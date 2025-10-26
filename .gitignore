@@ -1,0 +1,33 @@
+# OS
+.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+*.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+
+# Cache & build
+.cache/
+.dist/
+dist/
+build/
+.ipynb_checkpoints/
+.pytest_cache/
+
+# Project specific
+# Do NOT commit secrets or dumps
+/data/
+# If you want to keep data dir, uncomment and add a .keep file
+# data/.keep
+
+# Docker
+*.log

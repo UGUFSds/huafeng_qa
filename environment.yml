@@ -1,0 +1,14 @@
+name: huafeng-qa
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.10
+  - pip
+  - psycopg2>=2.9
+  - sqlalchemy>=2.0
+  - python-dotenv>=1.0
+  - pip:
+      - langchain>=0.2.16
+      - langchain-openai>=0.2.6
+      - langchain-community>=0.2.16
