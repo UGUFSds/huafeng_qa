@@ -1,0 +1,9 @@
+# 避免把数据和临时文件打入镜像上下文
+data/
+docker/postgres/import/
+__pycache__/
+.pytest_cache/
+.venv/
+*.pyc
+*.pyo
+.DS_Store

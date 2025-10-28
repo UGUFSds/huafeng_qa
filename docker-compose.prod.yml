@@ -1,0 +1,30 @@
+services:
+  db:
+    # 复用现有 docker-compose.yml 中的配置；这里补充初始化脚本挂载
+    volumes:
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d
+
+  app:
+    build: .
+    depends_on:
+      - db
+    environment:
+      # 选择内部部署模型
+      HUAFENG_PROVIDER: ${HUAFENG_PROVIDER:-deepseek-internal}
+      HUAFENG_INTERNAL_BASE_URL: ${HUAFENG_INTERNAL_BASE_URL}
+      # 如内部需要 Key，可在 .env.prod 提供
+      HUAFENG_DEEPSEEK_API_KEY: ${HUAFENG_DEEPSEEK_API_KEY}
+
+      # DB 在同一网络下用服务名互联
+      HUAFENG_LOCAL_POSTGRES_HOST: ${HUAFENG_LOCAL_POSTGRES_HOST:-db}
+      HUAFENG_LOCAL_POSTGRES_PORT: ${HUAFENG_LOCAL_POSTGRES_PORT:-5432}
+      HUAFENG_LOCAL_POSTGRES_USER: ${HUAFENG_LOCAL_POSTGRES_USER:-postgres}
+      HUAFENG_LOCAL_POSTGRES_PASSWORD: ${HUAFENG_LOCAL_POSTGRES_PASSWORD:-postgres}
+      HUAFENG_LOCAL_POSTGRES_DB: ${HUAFENG_LOCAL_POSTGRES_DB:-industrial_db}
+      HUAFENG_LOCAL_POSTGRES_SSLMODE: ${HUAFENG_LOCAL_POSTGRES_SSLMODE:-disable}
+
+      # 模型配置
+      HUAFENG_TEXT2SQL_MODEL: ${HUAFENG_TEXT2SQL_MODEL:-deepseek-chat}
+      HUAFENG_ANALYSIS_MODEL: ${HUAFENG_ANALYSIS_MODEL:-deepseek-chat}
+
+    command: ["python", "scripts/huafeng_service.py", "--provider", "${HUAFENG_PROVIDER:-deepseek-internal}"]

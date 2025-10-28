@@ -7,6 +7,7 @@ import argparse
 load_dotenv()
 
 BASE_URL = os.getenv("HUAFENG_DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
+INTERNAL_BASE_URL = os.getenv("HUAFENG_INTERNAL_BASE_URL", BASE_URL).rstrip("/")
 API_KEY = os.getenv("HUAFENG_DEEPSEEK_API_KEY")
 MODEL = (
     os.getenv("HUAFENG_TEXT2SQL_MODEL")
@@ -26,20 +27,21 @@ DB_URI = (
     f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}?sslmode={PG_SSLMODE}"
 )
 
+# API Key 提示：当使用 deepseek-api 时需要；deepseek-internal 可能不需要
 if not API_KEY:
-    raise RuntimeError("HUAFENG_DEEPSEEK_API_KEY 未设置，无法调用 DeepSeek API")
+    print("[warn] HUAFENG_DEEPSEEK_API_KEY 未设置；如使用 deepseek-internal 可忽略。")
 
 from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
-try:
-    from langchain_core.callbacks.base import BaseCallbackHandler
-except Exception:
-    from langchain.callbacks.base import BaseCallbackHandler
+from langchain_core.callbacks.base import BaseCallbackHandler
 import time
 
 
-def build_llm(base_url: str) -> ChatOpenAI:
+def build_llm(base_url: str, provider: str) -> ChatOpenAI:
+    # 对于 deepseek-api，必须提供 API_KEY；内部部署可能允许空Key
+    if provider == "deepseek-api" and not API_KEY:
+        raise RuntimeError("缺少 HUAFENG_DEEPSEEK_API_KEY，无法使用 deepseek-api 提供方")
     return ChatOpenAI(
         model=MODEL,
         api_key=API_KEY,
@@ -48,9 +50,9 @@ def build_llm(base_url: str) -> ChatOpenAI:
     )
 
 
-def build_agent(base_url: str, max_iterations: int = 20):
+def build_agent(base_url: str, max_iterations: int = 20, provider: str = "deepseek-api"):
     db = SQLDatabase.from_uri(DB_URI)
-    llm = build_llm(base_url)
+    llm = build_llm(base_url, provider)
     agent = create_sql_agent(
         llm,
         db=db,
@@ -67,6 +69,12 @@ def parse_args():
     parser.add_argument("--question", "-q", help="以非交互方式提交一次性问题")
     parser.add_argument("--lang", default="zh", choices=["zh", "en"], help="输出语言（默认中文）")
     parser.add_argument("--max-steps", type=int, default=20, help="Agent 最大迭代步数（默认20）")
+    parser.add_argument(
+        "--provider",
+        default=os.getenv("HUAFENG_PROVIDER", "deepseek-api"),
+        choices=["deepseek-api", "deepseek-internal"],
+        help="LLM提供方（默认deepseek-api；集团内部部署用deepseek-internal）",
+    )
     return parser.parse_args()
 
 
@@ -203,18 +211,22 @@ class ChineseConsoleCallback(BaseCallbackHandler):
 def main():
     args = parse_args()
     print("[env] BASE_URL=", BASE_URL)
+    print("[env] INTERNAL_BASE_URL=", INTERNAL_BASE_URL)
     print("[env] MODEL=", MODEL)
     safe_uri = DB_URI.replace(PG_PASSWORD, "***")
     print("[env] DB_URI=", safe_uri)
 
     # Try primary base_url first, fallback to /v1 if needed
+    # 根据 provider 选择 base_url
+    selected_base = BASE_URL if args.provider == "deepseek-api" else INTERNAL_BASE_URL
     try:
-        agent = build_agent(BASE_URL, max_iterations=getattr(args, "max_steps", 20))
+        agent = build_agent(selected_base, max_iterations=getattr(args, "max_steps", 20), provider=args.provider)
     except Exception as e1:
         print("[warn] 构建Agent失败，尝试使用 fallback base_url:", e1)
-        fallback_url = BASE_URL + "/v1"
+        # deepseek-api 可能需要 /v1 后缀；内部部署通常不需要
+        fallback_url = (selected_base + "/v1") if args.provider == "deepseek-api" else selected_base
         try:
-            agent = build_agent(fallback_url, max_iterations=getattr(args, "max_steps", 20))
+            agent = build_agent(fallback_url, max_iterations=getattr(args, "max_steps", 20), provider=args.provider)
             print("[info] 使用 fallback base_url:", fallback_url)
         except Exception as e2:
             print("[error] fallback仍失败：", e2)
