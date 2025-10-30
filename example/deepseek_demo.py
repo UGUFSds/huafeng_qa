@@ -82,9 +82,9 @@ def demo_basic_chat():
     
     # 初始化客户端
     client = DeepSeekClient(
-        api_key="e3a1c7d92f6b48e09f2cb943da8e7c4f64bb1d3ab2749f05f1a0bde25dce9f3a",
-        base_url="http://deepseek01.huafeng.com:8080/v1",
-        model_name="deepseek-v3-awq"
+        api_key="sk-your-key-here",
+        base_url="https://api.deepseek.com",
+        model_name="deepseek-chat"
     )
     
     # 准备消息
@@ -320,4 +320,4 @@ def main():
         traceback.print_exc()
 
 if __name__ == "__main__":
-    main() 
+    main()
