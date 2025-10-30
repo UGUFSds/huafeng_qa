@@ -11,6 +11,13 @@ load_dotenv()
 
 BASE_URL = os.getenv("HUAFENG_DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
 API_KEY = os.getenv("HUAFENG_DEEPSEEK_API_KEY")
+# Provider & extra configuration for DeepSeek compatibility (api/internal)
+PROVIDER = os.getenv("HUAFENG_DEEPSEEK_PROVIDER", "api").strip().lower()
+INTERNAL_BASE_URL = os.getenv("HUAFENG_DEEPSEEK_INTERNAL_BASE_URL", BASE_URL).rstrip("/")
+# Optional extras passed to the LLM client
+_ENABLE_AUTO = os.getenv("HUAFENG_DEEPSEEK_ENABLE_AUTO_TOOL_CHOICE", "").strip()
+_TOOL_PARSER = os.getenv("HUAFENG_DEEPSEEK_TOOL_CALL_PARSER", "").strip()
+_EXTRA_HEADERS_JSON = os.getenv("HUAFENG_DEEPSEEK_EXTRA_HEADERS_JSON", "").strip()
 MODEL = (
     os.getenv("HUAFENG_TEXT2SQL_MODEL")
     or os.getenv("HUAFENG_ANALYSIS_MODEL")
@@ -119,11 +126,30 @@ class SqlDataSource(DataSource):
 
 
 def build_llm(base_url: str) -> ChatOpenAI:
+    # Prepare optional model kwargs
+    model_kwargs: Dict[str, Any] = {}
+    try:
+        if _ENABLE_AUTO:
+            val = _ENABLE_AUTO.lower() in {"1", "true", "yes", "on"}
+            model_kwargs["enable_auto_tool_choice"] = val
+        if _TOOL_PARSER:
+            model_kwargs["tool_call_parser"] = _TOOL_PARSER
+    except Exception:
+        pass
+    # Optional default headers
+    headers: Optional[Dict[str, str]] = None
+    if _EXTRA_HEADERS_JSON:
+        try:
+            headers = json.loads(_EXTRA_HEADERS_JSON)
+        except Exception:
+            headers = None
     return ChatOpenAI(
         model=MODEL,
         api_key=API_KEY,
         base_url=base_url,
         temperature=0.0,
+        model_kwargs=model_kwargs,
+        default_headers=headers,
     )
 
 
@@ -705,6 +731,46 @@ class RoutingOrchestrator:
                 keys.append(k)
         return keys
     @staticmethod
+    def _extract_csv_candidates(raw: Any) -> Optional[str]:
+        """从 CSV Agent 的原始输出中提取结构化候选（仅桥接列），并序列化为 JSON 字符串。"""
+        try:
+            data = raw.get("data") if isinstance(raw, dict) else None
+            if not data:
+                return None
+            keys = RoutingOrchestrator._candidate_bridge_keys()
+            rows = None
+            if isinstance(data, dict):
+                if isinstance(data.get("rows"), list):
+                    rows = data["rows"]
+                elif isinstance(data.get("groups"), list):
+                    rows = data["groups"]
+            candidates: List[Dict[str, str]] = []
+            if isinstance(rows, list):
+                for item in rows:
+                    if not isinstance(item, dict):
+                        continue
+                    cand: Dict[str, str] = {}
+                    for k in keys:
+                        v = item.get(k)
+                        if isinstance(v, str) and v.strip():
+                            cand[k] = v.strip()
+                    if cand:
+                        candidates.append(cand)
+            if not candidates:
+                return None
+            # 去重并限制大小
+            uniq: List[Dict[str, str]] = []
+            seen: set = set()
+            for c in candidates:
+                key = json.dumps(c, ensure_ascii=False, sort_keys=True)
+                if key not in seen:
+                    uniq.append(c)
+                    seen.add(key)
+            out = uniq[:10]
+            return json.dumps(out, ensure_ascii=False)
+        except Exception:
+            return None
+    @staticmethod
     def _rewrite_for_csv(question: str, lang: str, intent: Dict[str, Any]) -> str:
         keys = RoutingOrchestrator._candidate_bridge_keys()
         keys_text = ", ".join(keys)
@@ -737,20 +803,38 @@ class RoutingOrchestrator:
             # 适度截断，避免提示过长
             t = context["csv_text"].strip()
             csv_hint = t[:500] + ("…" if len(t) > 500 else "")
+        json_hint = ""
+        if context and isinstance(context.get("csv_candidates_json"), str) and context.get("csv_candidates_json"):
+            j = context["csv_candidates_json"].strip()
+            json_hint = j[:800] + ("…" if len(j) > 800 else "")
         if lang == "zh":
             base = (
                 "请使用工业数据库(sql_database)回答。点位主数据由 CSV(opcae_lookup) 提供。"
                 "如需报警或历史数据：使用 alarm_event（报警总表）与按点位拆分的历史表。"
                 "访问历史表应基于明确的检索键与时间窗口，限制返回条数。"
             )
-            bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint}" if csv_hint else f"优先使用桥接列进行过滤（例如 {keys_text}）。"
+            if csv_hint and json_hint:
+                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint} 与 JSON 候选：{json_hint}。"
+            elif csv_hint:
+                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint}。"
+            elif json_hint:
+                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 JSON 候选：{json_hint}。"
+            else:
+                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}）。"
             return base + " " + bridge + " 原始问题：" + question
         base = (
             "Use the industrial SQL database. Point master data comes from the CSV (opcae_lookup). "
             "For alarms or history, use alarm_event and per-point history tables. "
             "Access history tables based on specific keys and time windows; limit returned rows. "
         )
-        bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}) and consider CSV candidates: {csv_hint}" if csv_hint else f"Prefer filtering via bridge keys (e.g., {keys_text})."
+        if csv_hint and json_hint:
+            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider CSV candidates: {csv_hint} and JSON candidates: {json_hint}. "
+        elif csv_hint:
+            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider CSV candidates: {csv_hint}. "
+        elif json_hint:
+            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider JSON candidates: {json_hint}. "
+        else:
+            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}). "
         return base + bridge + " Original question: " + question
 
     def _rewrite_queries_for_sources(self, question: str, ordered_sources: List[str], lang: str) -> Dict[str, str]:
@@ -945,7 +1029,17 @@ class RoutingOrchestrator:
                         if _out.get("source") == "opcae_lookup":
                             last_csv = _out
                             break
-                    ctx = {"csv_text": (last_csv.get("text") if last_csv else None)}
+                    # 结构化候选（JSON）提取：从 CSV Agent 的 data.rows / data.groups 中提取桥接列
+                    csv_json = None
+                    try:
+                        if last_csv and isinstance(last_csv.get("raw"), dict):
+                            csv_json = RoutingOrchestrator._extract_csv_candidates(last_csv.get("raw"))
+                    except Exception:
+                        csv_json = None
+                    ctx = {
+                        "csv_text": (last_csv.get("text") if last_csv else None),
+                        "csv_candidates_json": csv_json,
+                    }
                     intent = self._detect_intent(question, lang)
                     q = self._rewrite_for_sql(question, lang, intent, context=ctx)
                 else:
@@ -971,14 +1065,17 @@ class RoutingOrchestrator:
 def main():
     args = parse_args()
     print("[env] BASE_URL=", BASE_URL)
+    print("[env] PROVIDER=", PROVIDER)
+    if INTERNAL_BASE_URL != BASE_URL:
+        print("[env] INTERNAL_BASE_URL=", INTERNAL_BASE_URL)
     print("[env] MODEL=", MODEL)
     safe_uri = DB_URI.replace(PG_PASSWORD, "***")
     print("[env] DB_URI=", safe_uri)
     csv_path = os.getenv("HUAFENG_OPCAE_CSV_PATH", os.path.join("data", "point_data.csv"))
     print("[env] OPCAE_CSV_PATH=", csv_path)
 
-    # Try primary base_url first, fallback to /v1 if needed
-    selected_base = BASE_URL
+    # 根据 provider 选择 base_url；必要时回退到 /v1
+    selected_base = INTERNAL_BASE_URL if PROVIDER in {"internal", "gateway"} else BASE_URL
     csv_source = None
     active_base_url = selected_base
     try:
@@ -1007,6 +1104,7 @@ def main():
         print(f"  - {src.short_info()}")
     planner_llm = build_llm(active_base_url)
     router = RoutingOrchestrator(planner_llm, AVAILABLE_SOURCES)
+    print("[env] ACTIVE_BASE_URL=", active_base_url)
 
     # 如果传入了 --question，非交互执行一次
     if getattr(args, "question", None):
