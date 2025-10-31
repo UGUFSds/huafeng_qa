@@ -168,6 +168,11 @@ def main():
     print("输入 :quit 或 :exit 退出。")
     if _USE_PTK:
         print("[env] 已启用增强输入（支持方向键、历史与编辑）")
+    else:
+        term = os.environ.get("TERM", "")
+        print("[warn] 当前为基础输入模式。若方向键输出 ^[[C/^[[D，请安装 prompt_toolkit：pip install prompt_toolkit")
+        if term.lower() in {"dumb", ""}:
+            print("[hint] 检测到 TERM='dumb'，建议在系统终端运行或设置 TERM=xterm-256color")
 
     # 会话统计
     session_prompt_tokens = 0
