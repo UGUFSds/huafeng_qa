@@ -1,6 +1,7 @@
 import json
 import os
 from typing import Any, Dict, List, Optional, Sequence
+import re
 
 from langchain_openai import ChatOpenAI
 from langchain_core.callbacks.base import BaseCallbackHandler
@@ -218,7 +219,88 @@ class SimpleCsvToolsAgent:
                     follow_messages = list(messages) + [AIMessage(content=getattr(resp, "content", ""), tool_calls=tool_calls), tm]
                     final = self.llm.invoke(follow_messages, config=config) if config else self.llm.invoke(follow_messages)
                     return {"output": getattr(final, "content", str(final)), "data": data_out}
+
+        # Fallback: parse DeepSeek-style inline tool call markup in text content
+        content_text = getattr(resp, "content", "") or ""
+        ds_calls = self._parse_inline_tool_calls(content_text)
+        if ds_calls:
+            for name, args in ds_calls:
+                # Normalize tool names and args to our schema
+                norm_name, norm_args = self._normalize_tool_call(name, args)
+                tool = next((t for t in self.tools if t.name == norm_name), None)
+                if not tool:
+                    continue
+                try:
+                    data_out = tool.invoke(norm_args or {})
+                except Exception as exc:
+                    data_out = {"error": str(exc)}
+                tm = ToolMessage(content=json.dumps(data_out, ensure_ascii=False), tool_call_id=str(norm_name))
+                follow_messages = list(messages) + [AIMessage(content=content_text), tm]
+                final = self.llm.invoke(follow_messages, config=config) if config else self.llm.invoke(follow_messages)
+                return {"output": getattr(final, "content", str(final)), "data": data_out}
         return {"output": getattr(resp, "content", str(resp)), "data": data_out}
+
+    @staticmethod
+    def _parse_inline_tool_calls(text: str) -> List[tuple]:
+        """Parse DeepSeek-style inline tool call markup from model text output.
+
+        Example chunks: <｜tool▁call▁begin｜>csv_search_rows<｜tool▁sep｜>{...}<｜tool▁call▁end｜>
+        Returns list of (name, args_dict).
+        """
+        if not text:
+            return []
+        calls: List[tuple] = []
+        start_tok = "<｜tool▁call▁begin｜>"
+        sep_tok = "<｜tool▁sep｜>"
+        end_tok = "<｜tool▁call▁end｜>"
+        i = 0
+        while True:
+            s = text.find(start_tok, i)
+            if s < 0:
+                break
+            s_name = s + len(start_tok)
+            s_sep = text.find(sep_tok, s_name)
+            if s_sep < 0:
+                break
+            name = text[s_name:s_sep].strip()
+            s_args = s_sep + len(sep_tok)
+            s_end = text.find(end_tok, s_args)
+            if s_end < 0:
+                break
+            raw = text[s_args:s_end].strip()
+            try:
+                args = json.loads(raw)
+            except Exception:
+                args = {}
+            calls.append((name, args))
+            i = s_end + len(end_tok)
+        return calls
+
+    @staticmethod
+    def _normalize_tool_call(name: str, args: Dict[str, Any]) -> tuple:
+        """Normalize external tool-call names and adapt arguments to internal tools.
+
+        - csv_search_rows -> csv_find_rows (convert column/substring to where)
+        - csv_list_columns -> csv_columns
+        """
+        mapping = {
+            "csv_search_rows": "csv_find_rows",
+            "csv_list_columns": "csv_columns",
+        }
+        norm = mapping.get(name, name)
+        a = dict(args or {})
+        if norm == "csv_find_rows":
+            # Convert simple schema: {column, substring|equals, select?, limit?}
+            column = a.get("column")
+            value = a.get("substring") or a.get("equals") or a.get("value")
+            op = "contains" if a.get("substring") else ("equals" if a.get("equals") or a.get("value") else "contains")
+            where = []
+            if column and value is not None:
+                where = [{"column": str(column), "op": op, "value": str(value)}]
+            select = a.get("select")
+            limit = a.get("limit", 20)
+            return norm, {"where": where, "select": select, "limit": limit}
+        return norm, a
 
 
 def build_csv_source(base_url: str, max_iterations: int = 10):
