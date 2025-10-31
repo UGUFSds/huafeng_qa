@@ -10,9 +10,6 @@ from huafeng.config.settings import (
     API_KEY,
     PROVIDER,
     INTERNAL_BASE_URL,
-    ENABLE_AUTO_TOOL_CHOICE as _ENABLE_AUTO,
-    TOOL_CALL_PARSER as _TOOL_PARSER,
-    EXTRA_HEADERS_JSON as _EXTRA_HEADERS_JSON,
     MODEL,
     PG_HOST,
     PG_PORT,
@@ -23,6 +20,7 @@ from huafeng.config.settings import (
     DB_URI,
     OPCAE_CSV_PATH,
 )
+from huafeng.llm.factory import build_llm
 
 # API Key 提示：本地运行使用 deepseek-api，如缺少 Key 可能无法调用
 if not API_KEY:
@@ -113,32 +111,7 @@ class SqlDataSource(DataSource):
             return f"[probe-error] {exc}"
 
 
-def build_llm(base_url: str) -> ChatOpenAI:
-    # Prepare optional model kwargs
-    model_kwargs: Dict[str, Any] = {}
-    try:
-        if _ENABLE_AUTO:
-            val = _ENABLE_AUTO.lower() in {"1", "true", "yes", "on"}
-            model_kwargs["enable_auto_tool_choice"] = val
-        if _TOOL_PARSER:
-            model_kwargs["tool_call_parser"] = _TOOL_PARSER
-    except Exception:
-        pass
-    # Optional default headers
-    headers: Optional[Dict[str, str]] = None
-    if _EXTRA_HEADERS_JSON:
-        try:
-            headers = json.loads(_EXTRA_HEADERS_JSON)
-        except Exception:
-            headers = None
-    return ChatOpenAI(
-        model=MODEL,
-        api_key=API_KEY,
-        base_url=base_url,
-        temperature=0.0,
-        model_kwargs=model_kwargs,
-        default_headers=headers,
-    )
+# build_llm 已迁移至 huafeng.llm.factory
 
 
 def _default_dataframe_description(df) -> str:
