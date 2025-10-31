@@ -2,38 +2,26 @@ import os
 import sys
 import asyncio
 import json
-from dotenv import load_dotenv
 import argparse
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, List
 
-# Load environment
-load_dotenv()
-
-BASE_URL = os.getenv("HUAFENG_DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-API_KEY = os.getenv("HUAFENG_DEEPSEEK_API_KEY")
-# Provider & extra configuration for DeepSeek compatibility (api/internal)
-PROVIDER = os.getenv("HUAFENG_DEEPSEEK_PROVIDER", "api").strip().lower()
-INTERNAL_BASE_URL = os.getenv("HUAFENG_DEEPSEEK_INTERNAL_BASE_URL", BASE_URL).rstrip("/")
-# Optional extras passed to the LLM client
-_ENABLE_AUTO = os.getenv("HUAFENG_DEEPSEEK_ENABLE_AUTO_TOOL_CHOICE", "").strip()
-_TOOL_PARSER = os.getenv("HUAFENG_DEEPSEEK_TOOL_CALL_PARSER", "").strip()
-_EXTRA_HEADERS_JSON = os.getenv("HUAFENG_DEEPSEEK_EXTRA_HEADERS_JSON", "").strip()
-MODEL = (
-    os.getenv("HUAFENG_TEXT2SQL_MODEL")
-    or os.getenv("HUAFENG_ANALYSIS_MODEL")
-    or "deepseek-chat"
-)
-
-# Postgres connection from .env
-PG_HOST = os.getenv("HUAFENG_LOCAL_POSTGRES_HOST", "127.0.0.1")
-PG_PORT = os.getenv("HUAFENG_LOCAL_POSTGRES_PORT", "5433")
-PG_DB = os.getenv("HUAFENG_LOCAL_POSTGRES_DB", "huafeng_db")
-PG_USER = os.getenv("HUAFENG_LOCAL_POSTGRES_USER", "postgres")
-PG_PASSWORD = os.getenv("HUAFENG_LOCAL_POSTGRES_PASSWORD", "postgres")
-PG_SSLMODE = os.getenv("HUAFENG_POSTGRES_SSLMODE", "disable")
-
-DB_URI = (
-    f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}?sslmode={PG_SSLMODE}"
+from huafeng.config.settings import (
+    BASE_URL,
+    API_KEY,
+    PROVIDER,
+    INTERNAL_BASE_URL,
+    ENABLE_AUTO_TOOL_CHOICE as _ENABLE_AUTO,
+    TOOL_CALL_PARSER as _TOOL_PARSER,
+    EXTRA_HEADERS_JSON as _EXTRA_HEADERS_JSON,
+    MODEL,
+    PG_HOST,
+    PG_PORT,
+    PG_DB,
+    PG_USER,
+    PG_PASSWORD,
+    PG_SSLMODE,
+    DB_URI,
+    OPCAE_CSV_PATH,
 )
 
 # API Key 提示：本地运行使用 deepseek-api，如缺少 Key 可能无法调用
@@ -361,7 +349,7 @@ class SimpleCsvToolsAgent:
 
 
 def build_csv_source(base_url: str, max_iterations: int = 10):
-    csv_path = os.getenv("HUAFENG_OPCAE_CSV_PATH", os.path.join("data", "point_data.csv"))
+    csv_path = OPCAE_CSV_PATH
     df = load_opcae_dataframe(csv_path)
     if df is None:
         return None
