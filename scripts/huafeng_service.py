@@ -29,6 +29,24 @@ if not API_KEY:
 
 import time
 
+# 增强输入：优先使用 prompt_toolkit 支持左右键与历史，失败则回退到内置 input()
+_USE_PTK = False
+try:
+    from prompt_toolkit import prompt as pt_prompt
+    from prompt_toolkit.history import InMemoryHistory
+    _ptk_history = InMemoryHistory()
+    _USE_PTK = True
+except Exception:
+    _USE_PTK = False
+
+def read_line(prompt_text: str) -> str:
+    if _USE_PTK:
+        try:
+            return pt_prompt(prompt_text, history=_ptk_history)
+        except Exception:
+            pass
+    return input(prompt_text)
+
 from huafeng.sources.base import DataSource
 from huafeng.sources.sql import build_sql_source
 from huafeng.sources.csv import build_csv_source
@@ -148,6 +166,8 @@ def main():
 
     print("\n交互式模式已启动。输入你的问题并回车提交。")
     print("输入 :quit 或 :exit 退出。")
+    if _USE_PTK:
+        print("[env] 已启用增强输入（支持方向键、历史与编辑）")
 
     # 会话统计
     session_prompt_tokens = 0
@@ -159,7 +179,7 @@ def main():
     session_chain_runtime_sec = 0.0
     while True:
         try:
-            question = input("[you] > ").strip()
+            question = read_line("[you] > ").strip()
         except (EOFError, KeyboardInterrupt):
             print("\n[info] 已退出。")
             break
