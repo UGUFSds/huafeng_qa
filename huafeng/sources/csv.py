@@ -4,7 +4,6 @@ from typing import Any, Dict, List, Optional, Sequence
 
 from langchain_openai import ChatOpenAI
 from langchain_core.callbacks.base import BaseCallbackHandler
-from langchain_core.prompts import ChatPromptTemplate
 from langchain_core.messages import AIMessage, ToolMessage
 from langchain_core.tools import StructuredTool
 from pydantic import BaseModel, Field
@@ -18,6 +17,7 @@ except ImportError:
 from huafeng.sources.base import DataSource
 from huafeng.llm.factory import build_llm
 from huafeng.config.settings import OPCAE_CSV_PATH
+from huafeng.prompts.csv_tools import build_csv_tools_prompt
 
 
 def _default_dataframe_description(df) -> str:
@@ -196,13 +196,8 @@ class SimpleCsvToolsAgent:
 
     def invoke(self, payload: Any, config: Optional[Dict[str, Any]] = None):
         query = payload.get("input") if isinstance(payload, dict) else str(payload)
-        system = (
-            "You are a CSV tool-calling assistant for the in-memory DataFrame 'opcae_lookup'. "
-            "Use the provided tools to retrieve structured candidates (bridge keys like point_id/tag/name/desc). "
-            "Do not access any local files or run arbitrary code. Respond concisely in the user's language."
-        )
         human = query
-        prompt = ChatPromptTemplate.from_messages([("system", system), ("human", "{q}")])
+        prompt = build_csv_tools_prompt()
         messages = prompt.format_messages(q=human)
         bound_llm = self.llm.bind_tools(self.tools)
         resp = bound_llm.invoke(messages, config=config) if config else bound_llm.invoke(messages)
