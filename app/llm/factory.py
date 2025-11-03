@@ -9,6 +9,8 @@ from app.config.settings import (
     ENABLE_AUTO_TOOL_CHOICE,
     TOOL_CALL_PARSER,
     EXTRA_HEADERS_JSON,
+    LLM_REQUEST_TIMEOUT,
+    LLM_MAX_TOKENS,
 )
 
 
@@ -34,6 +36,8 @@ def build_llm(base_url: str) -> ChatOpenAI:
         api_key=API_KEY,
         base_url=base_url,
         temperature=0.0,
+        timeout=LLM_REQUEST_TIMEOUT,
+        max_tokens=LLM_MAX_TOKENS,
         model_kwargs=model_kwargs,
         default_headers=headers,
     )

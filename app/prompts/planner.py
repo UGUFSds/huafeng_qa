@@ -9,7 +9,8 @@ def build_routing_planner_prompt() -> ChatPromptTemplate:
     system_text = (
         "You are a routing planner. Choose the best data sources to answer industrial QA queries. "
         "Respond in strict JSON with keys: ordered_sources (list of source names in execution order) "
-        "and strategy (short reasoning). Use only source names provided. Always include at least one source."
+        "and strategy (short reasoning). Use only source names provided. Always include at least one source. "
+        "If time context is implied but the year is not specified, plan queries to default to the current year."
     )
     human_text = (
         "User language: {lang}\n"

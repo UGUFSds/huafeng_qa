@@ -22,6 +22,8 @@ TOOL_CALL_PARSER = _env_any(["LLM_TOOL_CALL_PARSER", "HUAFENG_DEEPSEEK_TOOL_CALL
 EXTRA_HEADERS_JSON = _env_any(["LLM_EXTRA_HEADERS_JSON", "HUAFENG_DEEPSEEK_EXTRA_HEADERS_JSON"], default="").strip()
 
 MODEL = _env_any(["LLM_MODEL", "HUAFENG_TEXT2SQL_MODEL", "HUAFENG_ANALYSIS_MODEL"], default="deepseek-chat")
+LLM_REQUEST_TIMEOUT = int(_env_any(["LLM_REQUEST_TIMEOUT"], default="25"))
+LLM_MAX_TOKENS = int(_env_any(["LLM_MAX_TOKENS"], default="512"))
 
 # Postgres connection settings (supports new POSTGRES_* and legacy HUAFENG_* prefixes)
 PG_HOST = _env_any(["POSTGRES_HOST", "HUAFENG_LOCAL_POSTGRES_HOST"], default="127.0.0.1")
@@ -43,6 +45,12 @@ OPCAE_CSV_PATH = _env_any(["OPCAE_CSV_PATH", "HUAFENG_OPCAE_CSV_PATH"], default=
 USE_LLM_PLANNER = _env_any(["ROUTER_USE_LLM_PLANNER"], default="1").strip() in ("1", "true", "True")
 # Skip LLM summarizer when only one source contributed
 SUMMARIZE_SINGLE_SOURCE = _env_any(["ROUTER_SUMMARIZE_SINGLE_SOURCE"], default="0").strip() in ("1", "true", "True")
+# Globally enable/disable LLM summarizer for multi-source
+USE_LLM_SUMMARIZER = _env_any(["ROUTER_USE_LLM_SUMMARIZER"], default="1").strip() in ("1", "true", "True")
+# Enable/disable source probing to save time
+ROUTER_ENABLE_PROBE = _env_any(["ROUTER_ENABLE_PROBE"], default="1").strip() in ("1", "true", "True")
+# 并发执行多源以提高吞吐（在存在 CSV→SQL 依赖时自动串行）
+ROUTER_PARALLEL_EXECUTE = _env_any(["ROUTER_PARALLEL_EXECUTE"], default="1").strip() in ("1", "true", "True")
 # Short caches in seconds to avoid repeated introspection/prompts
 PROBE_CACHE_SECONDS = int(_env_any(["ROUTER_PROBE_CACHE_SECONDS"], default="60"))
 PLAN_CACHE_SECONDS = int(_env_any(["ROUTER_PLAN_CACHE_SECONDS"], default="120"))
@@ -51,3 +59,7 @@ REWRITE_CACHE_SECONDS = int(_env_any(["ROUTER_REWRITE_CACHE_SECONDS"], default="
 # SQL agent iteration cap and table sampling for faster planning/execution
 SQL_AGENT_MAX_ITERATIONS = int(_env_any(["SQL_AGENT_MAX_ITERATIONS"], default="12"))
 SQL_TABLE_INFO_SAMPLE_ROWS = int(_env_any(["SQL_TABLE_INFO_SAMPLE_ROWS"], default="0"))
+SQL_TABLE_INFO_CACHE_SECONDS = int(_env_any(["SQL_TABLE_INFO_CACHE_SECONDS"], default="600"))
+
+# CSV agent behavior
+CSV_AGENT_SECOND_PASS = _env_any(["CSV_AGENT_SECOND_PASS"], default="0").strip() in ("1", "true", "True")

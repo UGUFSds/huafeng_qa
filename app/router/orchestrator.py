@@ -9,7 +9,7 @@ from app.prompts import (
     build_evidence_summarizer_prompt,
 )
 
-from app.config.settings import API_KEY, USE_LLM_PLANNER, SUMMARIZE_SINGLE_SOURCE, PROBE_CACHE_SECONDS
+from app.config.settings import API_KEY, USE_LLM_PLANNER, SUMMARIZE_SINGLE_SOURCE, PROBE_CACHE_SECONDS, USE_LLM_SUMMARIZER, ROUTER_ENABLE_PROBE, PLAN_CACHE_SECONDS, REWRITE_CACHE_SECONDS, ROUTER_PARALLEL_EXECUTE
 from app.sources.base import DataSource
 
 
@@ -105,6 +105,7 @@ def localize_question(text: str, lang: str = "zh") -> str:
         "- 点位主数据通过 csv_lookup（CSV）获取。\n"
         "- 报警相关数据使用 alarm_event；历史曲线/时间段数据使用按点位拆分的历史表。\n"
         "- 禁止无差别枚举所有表；仅在明确给出检索键与时间窗口时访问历史表，并限制返回行数。\n"
+        "- 如未提及年份，默认查询今年的数据。\n"
         "- 执行前尽量进行语句校验；结果应简洁并附来源。"
     )
     policy_en = (
@@ -112,6 +113,7 @@ def localize_question(text: str, lang: str = "zh") -> str:
         "- Point master data is obtained from csv_lookup (CSV).\n"
         "- Use alarm_event for alarms; use per-point history tables for time-series data.\n"
         "- Do not enumerate tables; only access history when specific keys and time windows are provided, with row/time limits.\n"
+        "- If the year is not mentioned, default to the current year.\n"
         "- Validate queries; keep answers concise with citations."
     )
     steps_zh = (
@@ -145,6 +147,10 @@ class RoutingOrchestrator:
         self.sources = dict(sources)
         # short-lived cache to avoid repeated probe introspection
         self._probe_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
+        # short-lived plan cache
+        self._plan_cache: Dict[str, Tuple[float, Dict[str, Any], str]] = {}
+        # short-lived rewrite cache
+        self._rewrite_cache: Dict[str, Tuple[float, str]] = {}
 
     # --- Static heuristics: pre-filter and ordering ---
     @staticmethod
@@ -286,6 +292,7 @@ class RoutingOrchestrator:
                 "如无法确定精确点位，请基于名称/描述进行合理匹配，但避免仅返回自由文本；"
                 "尽量给出候选对象（含可作为后续 SQL 过滤的列值）。"
                 "注意：禁止访问其他本地文件，仅使用已加载的 DataFrame。"
+                "如问题涉及时间但未提及年份，默认查询今年的数据。"
                 "原始问题：" + question
             )
         return (
@@ -295,6 +302,7 @@ class RoutingOrchestrator:
             "If exact point is unclear, do reasonable match by name/desc; avoid returning only free text—"
             "provide candidate objects with columns usable for later SQL filtering. "
             "Do not access other local files; use only the in-memory DataFrame. "
+            "If the query implies time but no year is mentioned, default to the current year. "
             "Original question: " + question
         )
 
@@ -317,6 +325,7 @@ class RoutingOrchestrator:
                 "如需报警或历史数据：使用 alarm_event（报警总表）与按点位拆分的历史表。"
                 "访问历史表应基于明确的检索键与时间窗口，限制返回条数。"
                 "若 point_data.table_name 可用，优先据此定位目标历史表；过滤时优先使用 point_name 与 code。"
+                "如未提及年份，默认查询今年的数据。"
             )
             if csv_hint and json_hint:
                 bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint} 与 JSON 候选：{json_hint}。"
@@ -332,6 +341,7 @@ class RoutingOrchestrator:
             "For alarms or history, use alarm_event and per-point history tables. "
             "Access history tables based on specific keys and time windows; limit returned rows. "
             "When point_data.table_name is available, prefer using it to select the target history table; prioritize filtering by point_name and code. "
+            "If the year is not mentioned, default to the current year. "
         )
         if csv_hint and json_hint:
             bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider CSV candidates: {csv_hint} and JSON candidates: {json_hint}. "
@@ -346,13 +356,24 @@ class RoutingOrchestrator:
     def _rewrite_queries_for_sources(self, question: str, ordered_sources: List[str], lang: str) -> Dict[str, str]:
         intent = self._detect_intent(question, lang)
         rewritten = {}
+        import time
+        now = time.time()
         for name in ordered_sources:
+            # 读取缓存
+            ck = f"{lang}|{name}|{question}"
+            entry = self._rewrite_cache.get(ck)
+            if entry and (now - entry[0]) <= REWRITE_CACHE_SECONDS:
+                rewritten[name] = entry[1]
+                continue
+            # 生成并写入缓存（SQL 的上下文重写在 execute 阶段另行处理）
             if name == "csv_lookup":
-                rewritten[name] = self._rewrite_for_csv(question, lang, intent)
+                q = self._rewrite_for_csv(question, lang, intent)
             elif name == "sql_database":
-                rewritten[name] = self._rewrite_for_sql(question, lang, intent)
+                q = self._rewrite_for_sql(question, lang, intent)
             else:
-                rewritten[name] = question
+                q = question
+            rewritten[name] = q
+            self._rewrite_cache[ck] = (now, q)
         return rewritten
 
     # --- Summarize outputs with citations ---
@@ -364,6 +385,13 @@ class RoutingOrchestrator:
             src = outputs[0].get("source")
             text = outputs[0].get("text") or extract_agent_output(outputs[0].get("raw")) or ""
             return f"{text}\n\nSources: {src}"
+        # 全局关闭汇总 LLM：朴素合并
+        if not USE_LLM_SUMMARIZER:
+            merged = []
+            for item in outputs:
+                merged.append(f"[{item.get('source')}] {item.get('text') or ''}")
+            cites = ", ".join(s.get("source") for s in outputs)
+            return ("\n".join(merged)) + f"\n\nSources: {cites}"
         try:
             cite_lines = []
             for item in outputs:
@@ -427,6 +455,13 @@ class RoutingOrchestrator:
         candidate_sources, reason = self._apply_static_rules(question, lang)
         # If planner LLM is unavailable (e.g., missing API key) or only one candidate, skip LLM planning.
         use_llm = bool(API_KEY) and USE_LLM_PLANNER and len(candidate_sources) > 1
+        # 规划短期缓存：按语言+问题+候选集合键
+        import time
+        cache_key = f"{lang}|{question}|{','.join(candidate_sources)}"
+        now_ts = time.time()
+        cached = self._plan_cache.get(cache_key)
+        if cached and (now_ts - cached[0]) <= PLAN_CACHE_SECONDS:
+            return dict(cached[1]), cached[2]
         available = self._format_sources_for_prompt()
         # Reduce available to candidates for prompting
         available_lines = []
@@ -472,6 +507,8 @@ class RoutingOrchestrator:
         if not plan_data.get("strategy"):
             fallback_strategy = plan_data.get("reason") or plan_data.get("rationale") or ""
             plan_data["strategy"] = fallback_strategy
+        # 写入缓存
+        self._plan_cache[cache_key] = (now_ts, dict(plan_data), raw_content)
         return plan_data, raw_content
 
     async def _probe_async(self, source_names):
@@ -489,6 +526,9 @@ class RoutingOrchestrator:
     def probe_sources(self, source_names):
         if not source_names:
             return {}
+        # 全局跳过探测以加速（可配置）
+        if not ROUTER_ENABLE_PROBE:
+            return {name: "[probe-skipped]" for name in source_names}
         # Cache probe results briefly to avoid repeated DB introspection
         key = "|".join(source_names)
         import time
@@ -525,40 +565,105 @@ class RoutingOrchestrator:
         outputs = []
         # Per-source query rewriting
         rewritten = self._rewrite_queries_for_sources(question, ordered_sources, lang)
-        for name in ordered_sources:
-            src = self.sources.get(name)
-            if not src:
-                continue
+        # 并发执行：当不存在 CSV→SQL 的顺序依赖时尝试并行
+        def _has_csv_sql_dependency(names: List[str]) -> bool:
             try:
-                if name == "sql_database":
-                    # 将 CSV 阶段的输出作为上下文传给 SQL 重写，减少盲查
-                    last_csv = None
-                    for _out in reversed(outputs):
-                        if _out.get("source") == "csv_lookup":
-                            last_csv = _out
-                            break
-                    # 结构化候选（JSON）提取：从 CSV Agent 的 data.rows / data.groups 中提取桥接列
-                    csv_json = None
-                    try:
-                        if last_csv and isinstance(last_csv.get("raw"), dict):
-                            csv_json = RoutingOrchestrator._extract_csv_candidates(last_csv.get("raw"))
-                    except Exception:
-                        csv_json = None
-                    ctx = {
-                        "csv_text": (last_csv.get("text") if last_csv else None),
-                        "csv_candidates_json": csv_json,
-                    }
-                    intent = self._detect_intent(question, lang)
-                    q = self._rewrite_for_sql(question, lang, intent, context=ctx)
-                else:
+                i_csv = names.index("csv_lookup")
+                i_sql = names.index("sql_database")
+                return i_csv < i_sql
+            except ValueError:
+                return False
+
+        if ROUTER_PARALLEL_EXECUTE and len(ordered_sources) > 1 and not _has_csv_sql_dependency(ordered_sources):
+            async def _run_single(name: str):
+                src = self.sources.get(name)
+                if not src:
+                    return {"source": name, "text": "[error] source missing", "raw": None}
+                try:
+                    # 对 SQL 无上下文的情形使用预重写
                     q = rewritten.get(name, question)
-                result = src.run(q, callbacks=callbacks)
-                text = extract_agent_output(result)
-            except Exception as exc:
-                result = None
-                text = f"[error] {exc}"
-            outputs.append({"source": name, "text": text, "raw": result})
-            self._notify(callbacks, "on_routing_step", name, text, raw=result)
+                    result = await asyncio.to_thread(src.run, q, callbacks=callbacks)
+                    text = extract_agent_output(result)
+                except Exception as exc:
+                    result = None
+                    text = f"[error] {exc}"
+                self._notify(callbacks, "on_routing_step", name, text, raw=result)
+                return {"source": name, "text": text, "raw": result}
+
+            async def _run_all():
+                tasks = [asyncio.create_task(_run_single(n)) for n in ordered_sources]
+                res = await asyncio.gather(*tasks, return_exceptions=False)
+                return res
+
+            try:
+                outputs = asyncio.run(_run_all())
+            except RuntimeError:
+                # 已在事件循环中，降级为顺序
+                outputs = []
+                for name in ordered_sources:
+                    src = self.sources.get(name)
+                    if not src:
+                        continue
+                    try:
+                        q = rewritten.get(name, question)
+                        result = src.run(q, callbacks=callbacks)
+                        text = extract_agent_output(result)
+                    except Exception as exc:
+                        result = None
+                        text = f"[error] {exc}"
+                    outputs.append({"source": name, "text": text, "raw": result})
+                    self._notify(callbacks, "on_routing_step", name, text, raw=result)
+        else:
+            # 原有串行逻辑（保留 CSV→SQL 上下文传递）
+            for name in ordered_sources:
+                src = self.sources.get(name)
+                if not src:
+                    continue
+                try:
+                    if name == "sql_database":
+                        # 将 CSV 阶段的输出作为上下文传给 SQL 重写，减少盲查
+                        last_csv = None
+                        for _out in reversed(outputs):
+                            if _out.get("source") == "csv_lookup":
+                                last_csv = _out
+                                break
+                        # 结构化候选（JSON）提取：从 CSV Agent 的 data.rows / data.groups 中提取桥接列
+                        csv_json = None
+                        try:
+                            if last_csv and isinstance(last_csv.get("raw"), dict):
+                                csv_json = RoutingOrchestrator._extract_csv_candidates(last_csv.get("raw"))
+                        except Exception:
+                            csv_json = None
+                        ctx = {
+                            "csv_text": (last_csv.get("text") if last_csv else None),
+                            "csv_candidates_json": csv_json,
+                        }
+                        intent = self._detect_intent(question, lang)
+                        # SQL 上下文重写缓存
+                        import time
+                        now = time.time()
+                        # 将上下文摘要化以生成稳定的键
+                        t_sig = (ctx.get("csv_text") or "" )
+                        t_sig = t_sig[:200]
+                        j_sig = (ctx.get("csv_candidates_json") or "" )
+                        j_sig = j_sig[:200]
+                        ck = f"{lang}|sql_database|{question}|t:{t_sig}|j:{j_sig}"
+                        entry = self._rewrite_cache.get(ck)
+                        if entry and (now - entry[0]) <= REWRITE_CACHE_SECONDS:
+                            q = entry[1]
+                        else:
+                            q = self._rewrite_for_sql(question, lang, intent, context=ctx)
+                            self._rewrite_cache[ck] = (now, q)
+                    else:
+                        # 非 SQL 使用预重写；SQL 在此考虑 CSV 上下文并带缓存
+                        q = rewritten.get(name, question)
+                    result = src.run(q, callbacks=callbacks)
+                    text = extract_agent_output(result)
+                except Exception as exc:
+                    result = None
+                    text = f"[error] {exc}"
+                outputs.append({"source": name, "text": text, "raw": result})
+                self._notify(callbacks, "on_routing_step", name, text, raw=result)
         # Merge final answer with citations
         final_text = self._summarize_outputs(outputs, plan_data, lang, callbacks=callbacks)
         return {

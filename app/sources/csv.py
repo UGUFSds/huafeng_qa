@@ -17,7 +17,7 @@ except ImportError:
 
 from app.sources.base import DataSource
 from app.llm.factory import build_llm
-from app.config.settings import OPCAE_CSV_PATH
+from app.config.settings import OPCAE_CSV_PATH, CSV_AGENT_SECOND_PASS
 from app.prompts.csv_tools import build_csv_tools_prompt
 
 
@@ -218,6 +218,18 @@ class SimpleCsvToolsAgent:
                         data_out = tool.invoke(args)
                     except Exception as exc:
                         data_out = {"error": str(exc)}
+                    # 可配置跳过第二次 LLM 调用，直接返回结构化候选，节省一次往返
+                    if not CSV_AGENT_SECOND_PASS:
+                        short = data_out
+                        try:
+                            if isinstance(data_out, dict):
+                                # 生成一个简短的文本摘要，避免额外 LLM 调用
+                                rows = data_out.get("rows") or []
+                                groups = data_out.get("groups") or []
+                                short = f"CSV candidates: rows={len(rows)} groups={len(groups)}"
+                        except Exception:
+                            pass
+                        return {"output": str(short), "data": data_out}
                     tm = ToolMessage(content=json.dumps(data_out, ensure_ascii=False), tool_call_id=str(call_id))
                     follow_messages = list(messages) + [AIMessage(content=getattr(resp, "content", ""), tool_calls=tool_calls), tm]
                     final = self.llm.invoke(follow_messages, config=config) if config else self.llm.invoke(follow_messages)
@@ -237,6 +249,16 @@ class SimpleCsvToolsAgent:
                     data_out = tool.invoke(norm_args or {})
                 except Exception as exc:
                     data_out = {"error": str(exc)}
+                if not CSV_AGENT_SECOND_PASS:
+                    short = data_out
+                    try:
+                        if isinstance(data_out, dict):
+                            rows = data_out.get("rows") or []
+                            groups = data_out.get("groups") or []
+                            short = f"CSV candidates: rows={len(rows)} groups={len(groups)}"
+                    except Exception:
+                        pass
+                    return {"output": str(short), "data": data_out}
                 tm = ToolMessage(content=json.dumps(data_out, ensure_ascii=False), tool_call_id=str(norm_name))
                 follow_messages = list(messages) + [AIMessage(content=content_text), tm]
                 final = self.llm.invoke(follow_messages, config=config) if config else self.llm.invoke(follow_messages)

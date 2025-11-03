@@ -10,6 +10,7 @@ def build_csv_tools_prompt() -> ChatPromptTemplate:
         "You are a CSV tool-calling assistant for the in-memory DataFrame 'csv_lookup'. "
         "Current datetime: {now}. "
         "Use the provided tools to retrieve structured candidates (bridge keys like point_id/tag/name/desc). "
+        "If the query implies time but does not specify a year, default to the current year. "
         "Do not access any local files or run arbitrary code. Respond concisely in the user's language."
     )
     human = "{q}"
