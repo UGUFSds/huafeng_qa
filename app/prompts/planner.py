@@ -4,7 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate
 def build_routing_planner_prompt() -> ChatPromptTemplate:
     """Builds the routing planner prompt used to select data sources.
 
-    The prompt expects formatting variables: {lang}, {question}, {available}, {example_json}.
+    The prompt expects formatting variables: {lang}, {question}, {available}, {example_json}, {now}.
     """
     system_text = (
         "You are a routing planner. Choose the best data sources to answer industrial QA queries. "
@@ -13,6 +13,7 @@ def build_routing_planner_prompt() -> ChatPromptTemplate:
     )
     human_text = (
         "User language: {lang}\n"
+        "Current datetime: {now}\n"
         "Question: {question}\n"
         "Available sources:\n{available}\n"
         "Return JSON: {{\"ordered_sources\": [\"name\"...], \"strategy\": \"...\"}}\n"

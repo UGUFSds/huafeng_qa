@@ -13,4 +13,4 @@ COPY scripts/ ./scripts/
 
 # 运行脚本入口（可用 compose 覆盖传参）
 ENV PYTHONUNBUFFERED=1
-CMD ["python", "scripts/huafeng_service.py"]
+CMD ["python", "scripts/service.py"]

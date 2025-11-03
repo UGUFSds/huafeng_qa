@@ -1,4 +1,4 @@
-"""Data source modules for Huafeng."""
+"""Data source modules for the application."""
 
 from .base import DataSource
 from .csv import build_csv_source

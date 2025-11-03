@@ -4,13 +4,13 @@ from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, List
 
 from langchain_openai import ChatOpenAI
 from langchain_core.callbacks.base import BaseCallbackHandler
-from huafeng.prompts import (
+from app.prompts import (
     build_routing_planner_prompt,
     build_evidence_summarizer_prompt,
 )
 
-from huafeng.config.settings import API_KEY
-from huafeng.sources.base import DataSource
+from app.config.settings import API_KEY, USE_LLM_PLANNER, SUMMARIZE_SINGLE_SOURCE, PROBE_CACHE_SECONDS
+from app.sources.base import DataSource
 
 
 # 统一维护可用数据源注册（供提示与路由使用）
@@ -41,7 +41,7 @@ def format_schema_notes() -> Dict[str, str]:
     """生成统一的 Schema 提示，包括 CSV 列与 SQL 可用表，以及跨源桥接键集合说明。"""
     csv_cols = []
     try:
-        csv_src = AVAILABLE_SOURCES.get("opcae_lookup")
+        csv_src = AVAILABLE_SOURCES.get("csv_lookup")
         if csv_src and hasattr(csv_src, "dataframe") and csv_src.dataframe is not None:
             csv_cols = [str(c) for c in list(csv_src.dataframe.columns)]
     except Exception:
@@ -55,15 +55,15 @@ def format_schema_notes() -> Dict[str, str]:
         db_tables = []
     zh = (
         "【Schema 提示】\n"
-        f"- CSV(opcae_lookup) 列: {', '.join(csv_cols) if csv_cols else '未知'}\n"
+        f"- CSV(csv_lookup) 列: {', '.join(csv_cols) if csv_cols else '未知'}\n"
         f"- SQL 可用表: {', '.join(db_tables[:8]) + (' 等' if len(db_tables) > 8 else '') if db_tables else '未知'}\n"
-        "- 跨源桥接采用“相关列集合”，常见候选包含：point_id、tag/tag_name、name/desc、device_id、line_id。"
+        "- 跨源桥接采用“相关列集合”，优先候选：point_name、code、table_name；其次：point_id、tag/tag_name、name/desc、device_id、line_id。"
     )
     en = (
         "[Schema hints]\n"
-        f"- CSV(opcae_lookup) columns: {', '.join(csv_cols) if csv_cols else 'unknown'}\n"
+        f"- CSV(csv_lookup) columns: {', '.join(csv_cols) if csv_cols else 'unknown'}\n"
         f"- SQL usable tables: {', '.join(db_tables[:8]) + (' etc.' if len(db_tables) > 8 else '') if db_tables else 'unknown'}\n"
-        "- Cross-source bridging uses a set of relevant columns: point_id, tag/tag_name, name/desc, device_id, line_id."
+        "- Cross-source bridging uses relevant columns; prefer: point_name, code, table_name; then: point_id, tag/tag_name, name/desc, device_id, line_id."
     )
     return {"zh": zh, "en": en}
 
@@ -102,14 +102,14 @@ def localize_question(text: str, lang: str = "zh") -> str:
     schema_notes = format_schema_notes()
     policy_zh = (
         "【数据源使用政策】\n"
-        "- 点位主数据通过 opcae_lookup（CSV）获取。\n"
+        "- 点位主数据通过 csv_lookup（CSV）获取。\n"
         "- 报警相关数据使用 alarm_event；历史曲线/时间段数据使用按点位拆分的历史表。\n"
         "- 禁止无差别枚举所有表；仅在明确给出检索键与时间窗口时访问历史表，并限制返回行数。\n"
         "- 执行前尽量进行语句校验；结果应简洁并附来源。"
     )
     policy_en = (
         "[Source usage policy]\n"
-        "- Point master data is obtained from opcae_lookup (CSV).\n"
+        "- Point master data is obtained from csv_lookup (CSV).\n"
         "- Use alarm_event for alarms; use per-point history tables for time-series data.\n"
         "- Do not enumerate tables; only access history when specific keys and time windows are provided, with row/time limits.\n"
         "- Validate queries; keep answers concise with citations."
@@ -117,13 +117,13 @@ def localize_question(text: str, lang: str = "zh") -> str:
     steps_zh = (
         "【任务流程提醒】\n"
         "1. 先基于可用数据源制定计划，至少选择一个来源。\n"
-        "2. 如需点位主数据，调用 opcae_lookup（CSV）；如需历史/报警数据，调用 sql_database。\n"
+        "2. 如需点位主数据，调用 csv_lookup（CSV）；如需历史/报警数据，调用 sql_database。\n"
         "3. 多源场景下按计划串行执行，并在最终回答中整合来源信息。"
     )
     steps_en = (
         "[Workflow reminder]\n"
         "1. Form a plan against the available sources and select at least one.\n"
-        "2. Use opcae_lookup (CSV) for point master data; use sql_database for history/alarms.\n"
+        "2. Use csv_lookup (CSV) for point master data; use sql_database for history/alarms.\n"
         "3. When multiple sources are involved, execute sequentially and consolidate the answer."
     )
     if lang == "zh":
@@ -143,6 +143,8 @@ class RoutingOrchestrator:
     def __init__(self, planner_llm: ChatOpenAI, sources: Dict[str, DataSource]):
         self.planner_llm = planner_llm
         self.sources = dict(sources)
+        # short-lived cache to avoid repeated probe introspection
+        self._probe_cache: Dict[str, Tuple[float, Dict[str, str]]] = {}
 
     # --- Static heuristics: pre-filter and ordering ---
     @staticmethod
@@ -179,18 +181,18 @@ class RoutingOrchestrator:
         reason = ""
         # default order preference
         def order_by_pref(cands: List[str]) -> List[str]:
-            pref = ["opcae_lookup", "sql_database"]
+            pref = ["csv_lookup", "sql_database"]
             ordered = [n for n in pref if n in cands]
             for n in cands:
                 if n not in ordered:
                     ordered.append(n)
             return ordered
-        if intent["is_point_master"] and "opcae_lookup" in names:
-            cands = ["opcae_lookup", "sql_database"] if "sql_database" in names else ["opcae_lookup"]
+        if intent["is_point_master"] and "csv_lookup" in names:
+            cands = ["csv_lookup", "sql_database"] if "sql_database" in names else ["csv_lookup"]
             reason = "point master data -> CSV first, SQL optional"
             return order_by_pref(cands), reason
         if (intent["is_history"] or intent["is_alarm"]) and "sql_database" in names:
-            cands = ["sql_database", "opcae_lookup"] if "opcae_lookup" in names else ["sql_database"]
+            cands = ["sql_database", "csv_lookup"] if "csv_lookup" in names else ["sql_database"]
             reason = "history/alarms -> SQL primary, CSV optional"
             return order_by_pref(cands), reason
         # fallback: use all sources
@@ -202,13 +204,31 @@ class RoutingOrchestrator:
         """返回跨源桥接的候选列集合（动态 + 常见）。"""
         keys: List[str] = []
         try:
-            csv_src = AVAILABLE_SOURCES.get("opcae_lookup")
+            csv_src = AVAILABLE_SOURCES.get("csv_lookup")
             if csv_src and hasattr(csv_src, "dataframe") and csv_src.dataframe is not None:
                 cols = [str(c).lower() for c in list(csv_src.dataframe.columns)]
-                keys.extend([c for c in cols if c in {"point_id", "tag", "tag_name", "name", "desc", "device_id", "line_id"}])
+                keys.extend(
+                    [
+                        c
+                        for c in cols
+                        if c in {
+                            "point_name",
+                            "code",
+                            "table_name",
+                            "point_id",
+                            "tag",
+                            "tag_name",
+                            "name",
+                            "desc",
+                            "device_id",
+                            "line_id",
+                        }
+                    ]
+                )
         except Exception:
             pass
-        for k in ["point_id", "tag", "tag_name", "name", "desc", "device_id", "line_id"]:
+        # 优先顺序：point_name、code、table_name；其次 point_id 与其他常见桥接键
+        for k in ["point_name", "code", "table_name", "point_id", "tag", "tag_name", "name", "desc", "device_id", "line_id"]:
             if k not in keys:
                 keys.append(k)
         return keys
@@ -260,8 +280,8 @@ class RoutingOrchestrator:
         keys_text = ", ".join(keys)
         if lang == "zh":
             return (
-                "请使用点位主数据 CSV(opcae_lookup) 检索与问题相关的信息，并返回结构化候选。"
-                "优先包含字段：point_id、desc(描述)、unit(单位)、type(类型)、threshold(阈值)，以及可能的桥接列集合："
+                "请使用点位主数据 CSV(csv_lookup) 检索与问题相关的信息，并返回结构化候选。"
+                "优先包含字段：point_name、code、desc(描述)、unit(单位)、type(类型)、threshold(阈值)，以及可能的桥接列集合："
                 f"{keys_text}。"
                 "如无法确定精确点位，请基于名称/描述进行合理匹配，但避免仅返回自由文本；"
                 "尽量给出候选对象（含可作为后续 SQL 过滤的列值）。"
@@ -269,8 +289,8 @@ class RoutingOrchestrator:
                 "原始问题：" + question
             )
         return (
-            "Use the point master CSV (opcae_lookup) to retrieve relevant info and return structured candidates. "
-            "Prefer fields: point_id, desc(description), unit, type, threshold, and include likely bridge keys: "
+            "Use the point master CSV (csv_lookup) to retrieve relevant info and return structured candidates. "
+            "Prefer fields: point_name, code, desc(description), unit, type, threshold, and include likely bridge keys: "
             f"{keys_text}. "
             "If exact point is unclear, do reasonable match by name/desc; avoid returning only free text—"
             "provide candidate objects with columns usable for later SQL filtering. "
@@ -293,9 +313,10 @@ class RoutingOrchestrator:
             json_hint = j[:800] + ("…" if len(j) > 800 else "")
         if lang == "zh":
             base = (
-                "请使用工业数据库(sql_database)回答。点位主数据由 CSV(opcae_lookup) 提供。"
+                "请使用工业数据库(sql_database)回答。点位主数据由 CSV(csv_lookup) 提供。"
                 "如需报警或历史数据：使用 alarm_event（报警总表）与按点位拆分的历史表。"
                 "访问历史表应基于明确的检索键与时间窗口，限制返回条数。"
+                "若 point_data.table_name 可用，优先据此定位目标历史表；过滤时优先使用 point_name 与 code。"
             )
             if csv_hint and json_hint:
                 bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint} 与 JSON 候选：{json_hint}。"
@@ -310,6 +331,7 @@ class RoutingOrchestrator:
             "Use the industrial SQL database. Point master data comes from the CSV (opcae_lookup). "
             "For alarms or history, use alarm_event and per-point history tables. "
             "Access history tables based on specific keys and time windows; limit returned rows. "
+            "When point_data.table_name is available, prefer using it to select the target history table; prioritize filtering by point_name and code. "
         )
         if csv_hint and json_hint:
             bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider CSV candidates: {csv_hint} and JSON candidates: {json_hint}. "
@@ -325,7 +347,7 @@ class RoutingOrchestrator:
         intent = self._detect_intent(question, lang)
         rewritten = {}
         for name in ordered_sources:
-            if name == "opcae_lookup":
+            if name == "csv_lookup":
                 rewritten[name] = self._rewrite_for_csv(question, lang, intent)
             elif name == "sql_database":
                 rewritten[name] = self._rewrite_for_sql(question, lang, intent)
@@ -337,6 +359,11 @@ class RoutingOrchestrator:
     def _summarize_outputs(self, outputs: List[Dict[str, Any]], plan_data: Dict[str, Any], lang: str, callbacks: Optional[Sequence[BaseCallbackHandler]] = None) -> str:
         if not outputs:
             return ""
+        # Avoid extra LLM call when only one source contributed, unless explicitly enabled
+        if len(outputs) == 1 and not SUMMARIZE_SINGLE_SOURCE:
+            src = outputs[0].get("source")
+            text = outputs[0].get("text") or extract_agent_output(outputs[0].get("raw")) or ""
+            return f"{text}\n\nSources: {src}"
         try:
             cite_lines = []
             for item in outputs:
@@ -344,22 +371,13 @@ class RoutingOrchestrator:
                 text = extract_agent_output(item.get("raw")) or item.get("text") or ""
                 snippet = text if len(text) <= 400 else text[:400] + "…"
                 cite_lines.append(f"Source[{src}]: {snippet}")
-            system = (
-                "You are a summarizer. Merge the information from multiple sources into a single, concise answer. "
-                "At the end, append a short citations section listing which sources contributed (by source name). Respond in the user's language."
-            )
-            human = (
-                "Language: {lang}\n"
-                "Routing strategy: {strategy}\n"
-                "Ordered sources: {ordered}\n"
-                "Collected evidence:\n{evidence}\n"
-                "Return the merged answer first, then a citations list."
-            )
             strategy = plan_data.get("strategy", "")
             ordered = " -> ".join(plan_data.get("ordered_sources", []))
             evidence = "\n".join(cite_lines)
             prompt = build_evidence_summarizer_prompt()
-            messages = prompt.format_messages(lang=lang, strategy=strategy, ordered=ordered, evidence=evidence)
+            import datetime
+            now = datetime.datetime.now().astimezone().isoformat()
+            messages = prompt.format_messages(lang=lang, strategy=strategy, ordered=ordered, evidence=evidence, now=now)
             cfg = {"callbacks": list(callbacks)} if callbacks else None
             resp = self.planner_llm.invoke(messages, config=cfg) if cfg else self.planner_llm.invoke(messages)
             return getattr(resp, "content", str(resp))
@@ -408,7 +426,7 @@ class RoutingOrchestrator:
         # Static pre-filter
         candidate_sources, reason = self._apply_static_rules(question, lang)
         # If planner LLM is unavailable (e.g., missing API key) or only one candidate, skip LLM planning.
-        use_llm = bool(API_KEY) and len(candidate_sources) > 1
+        use_llm = bool(API_KEY) and USE_LLM_PLANNER and len(candidate_sources) > 1
         available = self._format_sources_for_prompt()
         # Reduce available to candidates for prompting
         available_lines = []
@@ -429,10 +447,12 @@ class RoutingOrchestrator:
             "Return JSON: {{\"ordered_sources\": [\"name\"...], \"strategy\": \"...\"}}\n"
             "Example: {example_json}"
         )
-        example_json = '{"ordered_sources": ["opcae_lookup", "sql_database"], "strategy": "先查CSV点位，再查数据库历史"}'
+        example_json = '{"ordered_sources": ["csv_lookup", "sql_database"], "strategy": "先查CSV点位，再查数据库历史"}'
         prompt = build_routing_planner_prompt()
         if use_llm:
-            messages = prompt.format_messages(lang=lang, question=question, available=available_text, example_json=example_json)
+            import datetime
+            now = datetime.datetime.now().astimezone().isoformat()
+            messages = prompt.format_messages(lang=lang, question=question, available=available_text, example_json=example_json, now=now)
             config = {"callbacks": list(callbacks)} if callbacks else None
             response = self.planner_llm.invoke(messages, config=config) if config else self.planner_llm.invoke(messages)
             raw_content = getattr(response, "content", str(response))
@@ -469,17 +489,26 @@ class RoutingOrchestrator:
     def probe_sources(self, source_names):
         if not source_names:
             return {}
+        # Cache probe results briefly to avoid repeated DB introspection
+        key = "|".join(source_names)
+        import time
+        now = time.time()
+        cached = self._probe_cache.get(key)
+        if cached and (now - cached[0]) <= PROBE_CACHE_SECONDS:
+            return dict(cached[1])
         try:
-            return asyncio.run(self._probe_async(source_names))
+            result = asyncio.run(self._probe_async(source_names))
         except RuntimeError:
             # already inside event loop; fallback to sequential
-            probe_data = {}
+            result = {}
             for name in source_names:
                 try:
-                    probe_data[name] = self.sources[name].probe()
+                    result[name] = self.sources[name].probe()
                 except Exception as exc:
-                    probe_data[name] = f"[probe-error] {exc}"
-            return probe_data
+                    result[name] = f"[probe-error] {exc}"
+        # store cache
+        self._probe_cache[key] = (now, dict(result))
+        return result
 
     def execute(
         self,
@@ -505,7 +534,7 @@ class RoutingOrchestrator:
                     # 将 CSV 阶段的输出作为上下文传给 SQL 重写，减少盲查
                     last_csv = None
                     for _out in reversed(outputs):
-                        if _out.get("source") == "opcae_lookup":
+                        if _out.get("source") == "csv_lookup":
                             last_csv = _out
                             break
                     # 结构化候选（JSON）提取：从 CSV Agent 的 data.rows / data.groups 中提取桥接列

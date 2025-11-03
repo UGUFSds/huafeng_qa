@@ -3,7 +3,7 @@ from typing import Any, Dict, Optional
 
 from langchain_openai import ChatOpenAI
 
-from huafeng.config.settings import (
+from app.config.settings import (
     API_KEY,
     MODEL,
     ENABLE_AUTO_TOOL_CHOICE,

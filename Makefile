@@ -1,5 +1,5 @@
-# Project: huafeng_qa
-CONDA_ENV := huafeng_qa
+# Project: qa_agent
+CONDA_ENV := qa_agent
 PY := python
 
 .PHONY: env install test run info clean

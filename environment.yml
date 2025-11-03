@@ -1,4 +1,4 @@
-name: huafeng-qa
+name: qa-agent
 channels:
   - conda-forge
   - defaults

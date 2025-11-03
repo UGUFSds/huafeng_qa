@@ -4,7 +4,7 @@ from langchain_core.prompts import ChatPromptTemplate
 def build_evidence_summarizer_prompt() -> ChatPromptTemplate:
     """Builds the summarizer prompt that merges multi-source outputs.
 
-    The prompt expects formatting variables: {lang}, {strategy}, {ordered}, {evidence}.
+    The prompt expects formatting variables: {lang}, {strategy}, {ordered}, {evidence}, {now}.
     """
     system = (
         "You are a summarizer. Merge the information from multiple sources into a single, concise answer. "
@@ -12,6 +12,7 @@ def build_evidence_summarizer_prompt() -> ChatPromptTemplate:
     )
     human = (
         "Language: {lang}\n"
+        "Current datetime: {now}\n"
         "Routing strategy: {strategy}\n"
         "Ordered sources: {ordered}\n"
         "Collected evidence:\n{evidence}\n"

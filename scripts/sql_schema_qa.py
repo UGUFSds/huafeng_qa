@@ -1,27 +1,11 @@
 import os
 from dotenv import load_dotenv
-
-# Load environment
-load_dotenv()
-
-BASE_URL = os.getenv("HUAFENG_DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-API_KEY = os.getenv("HUAFENG_DEEPSEEK_API_KEY")
-MODEL = (
-    os.getenv("HUAFENG_TEXT2SQL_MODEL")
-    or os.getenv("HUAFENG_ANALYSIS_MODEL")
-    or "deepseek-chat"
-)
-
-# Postgres connection from .env
-PG_HOST = os.getenv("HUAFENG_LOCAL_POSTGRES_HOST", "127.0.0.1")
-PG_PORT = os.getenv("HUAFENG_LOCAL_POSTGRES_PORT", "5433")
-PG_DB = os.getenv("HUAFENG_LOCAL_POSTGRES_DB", "huafeng_db")
-PG_USER = os.getenv("HUAFENG_LOCAL_POSTGRES_USER", "postgres")
-PG_PASSWORD = os.getenv("HUAFENG_LOCAL_POSTGRES_PASSWORD", "postgres")
-PG_SSLMODE = os.getenv("HUAFENG_POSTGRES_SSLMODE", "disable")
-
-DB_URI = (
-    f"postgresql+psycopg2://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DB}?sslmode={PG_SSLMODE}"
+from app.config.settings import (
+    BASE_URL,
+    API_KEY,
+    MODEL,
+    DB_URI,
+    PG_PASSWORD,
 )
 
 print(
@@ -29,7 +13,7 @@ print(
 )
 
 if not API_KEY:
-    raise RuntimeError("HUAFENG_DEEPSEEK_API_KEY 未设置，无法调用 DeepSeek API")
+    raise RuntimeError("LLM_API_KEY 未设置，无法调用 LLM 提供方 API")
 
 from langchain_openai import ChatOpenAI
 from langchain_community.utilities import SQLDatabase
@@ -62,9 +46,9 @@ def run_schema_qa(base_url: str, question: str):
 
 
 if __name__ == "__main__":
-    # Default question can be overridden by env HUAFENG_SCHEMA_QUESTION
+    # Default question can be overridden by env SCHEMA_QUESTION
     question = os.getenv(
-        "HUAFENG_SCHEMA_QUESTION",
+        "SCHEMA_QUESTION",
         "请详细说明我的数据库结构：列出所有表及主要字段，并说明主键/外键关系（如有）。",
     )
     try:

@@ -15,10 +15,10 @@ try:
 except ImportError:
     pd = None
 
-from huafeng.sources.base import DataSource
-from huafeng.llm.factory import build_llm
-from huafeng.config.settings import OPCAE_CSV_PATH
-from huafeng.prompts.csv_tools import build_csv_tools_prompt
+from app.sources.base import DataSource
+from app.llm.factory import build_llm
+from app.config.settings import OPCAE_CSV_PATH
+from app.prompts.csv_tools import build_csv_tools_prompt
 
 
 def _default_dataframe_description(df) -> str:
@@ -60,7 +60,7 @@ class CsvDataSource(DataSource):
         *,
         dataframe,
         source_path: str,
-        name: str = "opcae_lookup",
+        name: str = "csv_lookup",
         description: str = "Point master data in CSV",
     ):
         self._agent = agent
@@ -199,7 +199,10 @@ class SimpleCsvToolsAgent:
         query = payload.get("input") if isinstance(payload, dict) else str(payload)
         human = query
         prompt = build_csv_tools_prompt()
-        messages = prompt.format_messages(q=human)
+        # Provide current datetime context to the model
+        from datetime import datetime
+        now = datetime.now().astimezone().isoformat()
+        messages = prompt.format_messages(q=human, now=now)
         bound_llm = self.llm.bind_tools(self.tools)
         resp = bound_llm.invoke(messages, config=config) if config else bound_llm.invoke(messages)
         tool_calls = getattr(resp, "tool_calls", None) or getattr(resp, "additional_kwargs", {}).get("tool_calls")

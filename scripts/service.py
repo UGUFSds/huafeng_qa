@@ -5,7 +5,7 @@ import json
 import argparse
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, List
 
-from huafeng.config.settings import (
+from app.config.settings import (
     BASE_URL,
     API_KEY,
     PROVIDER,
@@ -20,12 +20,12 @@ from huafeng.config.settings import (
     DB_URI,
     OPCAE_CSV_PATH,
 )
-from huafeng.llm.factory import build_llm
-from huafeng.callbacks import TokenUsageHandler, ChineseConsoleCallback
+from app.llm.factory import build_llm
+from app.callbacks import TokenUsageHandler, ChineseConsoleCallback
 
-# API Key 提示：本地运行使用 deepseek-api，如缺少 Key 可能无法调用
+# API Key 提示：本地运行使用提供方 API，如缺少 Key 可能无法调用
 if not API_KEY:
-    print("[warn] HUAFENG_DEEPSEEK_API_KEY 未设置；可能无法调用 DeepSeek API")
+    print("[warn] LLM_API_KEY 未设置；可能无法调用 LLM 提供方 API")
 
 import time
 
@@ -47,10 +47,10 @@ def read_line(prompt_text: str) -> str:
             pass
     return input(prompt_text)
 
-from huafeng.sources.base import DataSource
-from huafeng.sources.sql import build_sql_source
-from huafeng.sources.csv import build_csv_source
-from huafeng.router import (
+from app.sources.base import DataSource
+from app.sources.sql import build_sql_source
+from app.sources.csv import build_csv_source
+from app.router import (
     RoutingOrchestrator,
     AVAILABLE_SOURCES,
     register_data_sources,
@@ -61,18 +61,18 @@ from huafeng.router import (
 )
 
 
-# DataSource 及具体实现已迁移至 huafeng.sources
+# 数据源接口及实现位于 app.sources
 
 
-# build_llm 已迁移至 huafeng.llm.factory
+# LLM 构建函数位于 app.llm.factory
 
 
-"""数据源构建函数已迁移至 huafeng.sources.csv 与 huafeng.sources.sql。"""
+"""数据源构建函数见 app.sources.csv 与 app.sources.sql。"""
 
 # 新增：命令行参数解析
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Huafeng 交互服务")
+    parser = argparse.ArgumentParser(description="交互式问答服务")
     parser.add_argument("--question", "-q", help="以非交互方式提交一次性问题")
     parser.add_argument("--lang", default="zh", choices=["zh", "en"], help="输出语言（默认中文）")
     parser.add_argument("--max-steps", type=int, default=20, help="Agent 最大迭代步数（默认20）")
@@ -80,16 +80,16 @@ def parse_args():
 
 
 
-# 路由相关工具与注册已迁移至 huafeng.router
+# 路由相关工具与注册位于 app.router
 
-# 提示本地化已迁移至 huafeng.router.localize_question
-
-
+# 提示本地化见 app.router.localize_question
 
 
 
 
-# 路由器实现已迁移至 huafeng.router.RoutingOrchestrator
+
+
+# 路由器实现见 app.router.RoutingOrchestrator
 
 
 def main():

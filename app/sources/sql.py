@@ -4,9 +4,9 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 from langchain_community.utilities import SQLDatabase
 from langchain_community.agent_toolkits import create_sql_agent
 
-from huafeng.sources.base import DataSource
-from huafeng.llm.factory import build_llm
-from huafeng.config.settings import DB_URI, PG_DB, PG_HOST, PG_PORT
+from app.sources.base import DataSource
+from app.llm.factory import build_llm
+from app.config.settings import DB_URI, PG_DB, PG_HOST, PG_PORT, SQL_AGENT_MAX_ITERATIONS, SQL_TABLE_INFO_SAMPLE_ROWS
 
 
 class SqlDataSource(DataSource):
@@ -45,9 +45,14 @@ class SqlDataSource(DataSource):
             return f"[probe-error] {exc}"
 
 
-def build_sql_source(base_url: str, max_iterations: int = 20) -> SqlDataSource:
+def build_sql_source(base_url: str, max_iterations: int = SQL_AGENT_MAX_ITERATIONS) -> SqlDataSource:
     """构建 SQL 数据源，屏蔽不应访问的表并返回包装后的 DataSource。"""
-    db = SQLDatabase.from_uri(DB_URI, ignore_tables=["point_data"])
+    # 降低 get_table_info 的采样行数，加速 Agent 生成与执行
+    db = SQLDatabase.from_uri(
+        DB_URI,
+        ignore_tables=["point_data"],
+        sample_rows_in_table_info=SQL_TABLE_INFO_SAMPLE_ROWS,
+    )
     llm = build_llm(base_url)
     agent = create_sql_agent(
         llm,

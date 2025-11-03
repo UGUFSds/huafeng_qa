@@ -8,8 +8,8 @@ from langchain_core.callbacks.base import BaseCallbackHandler
 # Ensure project root is on sys.path when running as a script from scripts/
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
-from huafeng.router import RoutingOrchestrator, register_data_sources, AVAILABLE_SOURCES
-from huafeng.sources.base import DataSource
+from app.router import RoutingOrchestrator, register_data_sources, AVAILABLE_SOURCES
+from app.sources.base import DataSource
 
 
 class DummyLLM:
@@ -39,7 +39,7 @@ class DummySource(DataSource):
 def main():
     register_data_sources(
         [
-            DummySource("opcae_lookup", "Point master data CSV (dummy)"),
+            DummySource("csv_lookup", "Point master data CSV (dummy)"),
             DummySource("sql_database", "Industrial SQL DB (dummy)"),
         ]
     )

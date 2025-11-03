@@ -1,20 +1,20 @@
 services:
   db:
     image: postgres:17
-    container_name: newhuafon_qa_postgres
+    container_name: qa_postgres
     restart: unless-stopped
     environment:
       - TZ=${TZ:-Asia/Shanghai}
-      - POSTGRES_DB=${HUAFENG_LOCAL_POSTGRES_DB:-huafeng_db}
-      - POSTGRES_USER=${HUAFENG_LOCAL_POSTGRES_USER:-postgres}
-      - POSTGRES_PASSWORD=${HUAFENG_LOCAL_POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-app_db}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-postgres}
     ports:
-      - "${HUAFENG_LOCAL_POSTGRES_PORT:-5433}:5432"
+      - "${POSTGRES_PORT:-5433}:5432"
     volumes:
       - db_data:/var/lib/postgresql/data
       - ./data:/import
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${HUAFENG_LOCAL_POSTGRES_USER:-postgres} -d ${HUAFENG_LOCAL_POSTGRES_DB:-huafeng_db} -h localhost"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres} -d ${POSTGRES_DB:-app_db} -h localhost"]
       interval: 10s
       timeout: 5s
       retries: 10
@@ -27,18 +27,18 @@ services:
     restart: "no"
     environment:
       - TZ=${TZ:-Asia/Shanghai}
-      - PGPASSWORD=${HUAFENG_LOCAL_POSTGRES_PASSWORD:-postgres}
-      - POSTGRES_DB=${HUAFENG_LOCAL_POSTGRES_DB:-huafeng_db}
-      - POSTGRES_USER=${HUAFENG_LOCAL_POSTGRES_USER:-postgres}
+      - PGPASSWORD=${POSTGRES_PASSWORD:-postgres}
+      - POSTGRES_DB=${POSTGRES_DB:-app_db}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
     volumes:
       - ./data:/import
     command: >
       sh -lc '
         set -e;
         echo "[seed] Waiting for db to be ready...";
-        until pg_isready -h db -U "${HUAFENG_LOCAL_POSTGRES_USER:-postgres}" -d "${HUAFENG_LOCAL_POSTGRES_DB:-huafeng_db}"; do sleep 2; done;
+        until pg_isready -h db -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-app_db}"; do sleep 2; done;
         echo "[seed] Restoring dump...";
-        PGPASSWORD="${HUAFENG_LOCAL_POSTGRES_PASSWORD:-postgres}" pg_restore --verbose --clean --if-exists --no-owner -h db -U "${HUAFENG_LOCAL_POSTGRES_USER:-postgres}" -d "${HUAFENG_LOCAL_POSTGRES_DB:-huafeng_db}" /import/industrial_db_full_latest.dump;
+        PGPASSWORD="${POSTGRES_PASSWORD:-postgres}" pg_restore --verbose --clean --if-exists --no-owner -h db -U "${POSTGRES_USER:-postgres}" -d "${POSTGRES_DB:-app_db}" /import/industrial_db_full_latest.dump;
         echo "[seed] Restore done.";
       '
 

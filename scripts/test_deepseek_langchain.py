@@ -1,23 +1,13 @@
 import os
 from dotenv import load_dotenv
-
-# Load .env
-load_dotenv()
-
-BASE_URL = os.getenv("HUAFENG_DEEPSEEK_BASE_URL", "https://api.deepseek.com").rstrip("/")
-API_KEY = os.getenv("HUAFENG_DEEPSEEK_API_KEY")
-MODEL = (
-    os.getenv("HUAFENG_TEXT2SQL_MODEL")
-    or os.getenv("HUAFENG_ANALYSIS_MODEL")
-    or "deepseek-chat"
-)
+from app.config.settings import BASE_URL, API_KEY, MODEL
 
 print(
     f"[env] BASE_URL={BASE_URL}, MODEL={MODEL}, API_KEY_SUFFIX={'***' + (API_KEY[-4:] if API_KEY else 'NONE')}"
 )
 
 if not API_KEY:
-    raise RuntimeError("HUAFENG_DEEPSEEK_API_KEY 未设置，无法调用 DeepSeek API")
+    raise RuntimeError("LLM_API_KEY 未设置，无法调用 LLM 提供方 API")
 
 from langchain_openai import ChatOpenAI
 
