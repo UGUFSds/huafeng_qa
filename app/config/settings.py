@@ -53,13 +53,35 @@ ROUTER_ENABLE_PROBE = _env_any(["ROUTER_ENABLE_PROBE"], default="1").strip() in 
 ROUTER_PARALLEL_EXECUTE = _env_any(["ROUTER_PARALLEL_EXECUTE"], default="1").strip() in ("1", "true", "True")
 # Short caches in seconds to avoid repeated introspection/prompts
 PROBE_CACHE_SECONDS = int(_env_any(["ROUTER_PROBE_CACHE_SECONDS"], default="60"))
-PLAN_CACHE_SECONDS = int(_env_any(["ROUTER_PLAN_CACHE_SECONDS"], default="120"))
-REWRITE_CACHE_SECONDS = int(_env_any(["ROUTER_REWRITE_CACHE_SECONDS"], default="180"))
+PLAN_CACHE_SECONDS = int(_env_any(["ROUTER_PLAN_CACHE_SECONDS"], default="300"))
+REWRITE_CACHE_SECONDS = int(_env_any(["ROUTER_REWRITE_CACHE_SECONDS"], default="300"))
+RESULT_CACHE_SECONDS = int(_env_any(["ROUTER_RESULT_CACHE_SECONDS"], default="600"))
 
 # SQL agent iteration cap and table sampling for faster planning/execution
 SQL_AGENT_MAX_ITERATIONS = int(_env_any(["SQL_AGENT_MAX_ITERATIONS"], default="12"))
 SQL_TABLE_INFO_SAMPLE_ROWS = int(_env_any(["SQL_TABLE_INFO_SAMPLE_ROWS"], default="0"))
-SQL_TABLE_INFO_CACHE_SECONDS = int(_env_any(["SQL_TABLE_INFO_CACHE_SECONDS"], default="600"))
+SQL_TABLE_INFO_CACHE_SECONDS = int(_env_any(["SQL_TABLE_INFO_CACHE_SECONDS"], default="1200"))
 
 # CSV agent behavior
 CSV_AGENT_SECOND_PASS = _env_any(["CSV_AGENT_SECOND_PASS"], default="0").strip() in ("1", "true", "True")
+
+# Clarification (disambiguation) behavior to avoid enumerating queries
+CLARIFY_ENABLED = _env_any(["ROUTER_CLARIFY_ENABLED"], default="1").strip() in ("1", "true", "True")
+CLARIFY_CANDIDATE_THRESHOLD = int(_env_any(["ROUTER_CLARIFY_CANDIDATE_THRESHOLD"], default="4"))
+CLARIFY_MAX_OPTIONS = int(_env_any(["ROUTER_CLARIFY_MAX_OPTIONS"], default="8"))
+
+# SQL query year guardrails
+# 强制在未明确年份时仅查询当年数据；可通过环境变量关闭或调整时间列名
+SQL_ENFORCE_CURRENT_YEAR_IF_UNSPECIFIED = _env_any(["SQL_ENFORCE_CURRENT_YEAR_IF_UNSPECIFIED"], default="1").strip() in ("1", "true", "True")
+SQL_YEAR_COLUMN_NAME = _env_any(["SQL_YEAR_COLUMN_NAME"], default="ts").strip()
+
+# Phoenix Evals integration toggles (safe defaults)
+EVALS_ENABLED = _env_any(["EVALS_ENABLED"], default="0").strip() in ("1", "true", "True")
+EVALS_PROVIDER = _env_any(["EVALS_PROVIDER"], default="openai").strip()
+# Prefer explicit EVALS_MODEL; if unset, fall back to primary MODEL; finally default to gpt-4o
+_EVALS_MODEL_RAW = _env_any(["EVALS_MODEL"], default="").strip()
+EVALS_MODEL = (_EVALS_MODEL_RAW or MODEL or "gpt-4o").strip()
+EVALS_SAMPLING_RATE = float(_env_any(["EVALS_SAMPLING_RATE"], default="0.2"))
+EVALS_LOG_PATH = _env_any(["EVALS_LOG_PATH"], default=os.path.join("eval_logs", "phoenix_evals.jsonl")).strip()
+# Per-query report directory (optional). If set, service will write one JSON report per query.
+EVALS_REPORT_DIR = _env_any(["EVALS_REPORT_DIR", "HUAFENG_EVALS_REPORT_DIR"], default="").strip()

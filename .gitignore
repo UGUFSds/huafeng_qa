@@ -31,3 +31,7 @@ build/
 
 # Docker
 *.log
+
+# Logs & reports
+eval_logs/
+reports/

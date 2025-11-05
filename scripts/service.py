@@ -3,6 +3,13 @@ import sys
 import asyncio
 import json
 import argparse
+# 保证项目根目录加入 sys.path（脚本位于 scripts/ 下时需要）
+try:
+    _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+except Exception:
+    pass
 from typing import Any, Dict, Iterable, Optional, Sequence, Tuple, List
 
 from app.config.settings import (
@@ -19,9 +26,11 @@ from app.config.settings import (
     PG_SSLMODE,
     DB_URI,
     OPCAE_CSV_PATH,
+    EVALS_REPORT_DIR,
 )
 from app.llm.factory import build_llm
 from app.callbacks import TokenUsageHandler, ChineseConsoleCallback
+from app.monitor import maybe_run_evals
 
 # API Key 提示：本地运行使用提供方 API，如缺少 Key 可能无法调用
 if not API_KEY:
@@ -76,6 +85,8 @@ def parse_args():
     parser.add_argument("--question", "-q", help="以非交互方式提交一次性问题")
     parser.add_argument("--lang", default="zh", choices=["zh", "en"], help="输出语言（默认中文）")
     parser.add_argument("--max-steps", type=int, default=20, help="Agent 最大迭代步数（默认20）")
+    parser.add_argument("--clarify", help="澄清选择的索引列表（逗号或空格分隔），例如: 0,2")
+    parser.add_argument("--report-dir", default=EVALS_REPORT_DIR or "", help="将本次查询报告写入该目录（JSON），为空则不写")
     return parser.parse_args()
 
 
@@ -102,6 +113,8 @@ def main():
     safe_uri = DB_URI.replace(PG_PASSWORD, "***")
     print("[env] DB_URI=", safe_uri)
     print("[env] OPCAE_CSV_PATH=", OPCAE_CSV_PATH)
+    if getattr(args, "report_dir", ""):
+        print("[env] REPORT_DIR=", args.report_dir)
 
     # 根据 provider 选择 base_url；必要时回退到 /v1
     selected_base = INTERNAL_BASE_URL if PROVIDER in {"internal", "gateway"} else BASE_URL
@@ -135,6 +148,21 @@ def main():
     router = RoutingOrchestrator(planner_llm, AVAILABLE_SOURCES)
     print("[env] ACTIVE_BASE_URL=", active_base_url)
 
+    def _write_per_query_report(report_dir: str, payload: Dict[str, Any]):
+        try:
+            if not report_dir:
+                return
+            os.makedirs(report_dir, exist_ok=True)
+            # timestamped filename
+            ts = time.strftime("%Y%m%d_%H%M%S")
+            fname = f"query_report_{ts}.json"
+            path = os.path.join(report_dir, fname)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(json.dumps(payload, ensure_ascii=False, indent=2))
+            print(f"[report] 已写入: {path}")
+        except Exception as e:
+            print("[warn] 写报告失败:", e)
+
     # 如果传入了 --question，非交互执行一次
     if getattr(args, "question", None):
         try:
@@ -151,9 +179,69 @@ def main():
             strategy = plan_info.get("strategy")
             if strategy:
                 print("[route] 策略:", strategy)
-            final_text = route_result.get("final_text") or extract_agent_output(route_result.get("outputs"))
-            print(f"[metrics] 本轮链用时 {chain_elapsed:.3f}s，LLM用时 {handler.llm_runtime_sec:.3f}s，LLM调用数 {handler.llm_calls}，tokens {handler.total_tokens}（prompt {handler.prompt_tokens}, completion {handler.completion_tokens}）")
-            print("\n[LLM] ", final_text)
+            needs = route_result.get("needs_clarification")
+            if needs:
+                clar = route_result.get("clarification") or {}
+                msg = clar.get("message") or "需要澄清以继续查询。"
+                options = clar.get("options") or []
+                print("\n[clarify] ", msg)
+                if options:
+                    print("[options]")
+                    for o in options:
+                        print(f"  {o.get('index')}. {o.get('label')}")
+                # 若提供 --clarify，则按选择继续执行一次
+                if getattr(args, "clarify", None):
+                    try:
+                        raw = args.clarify.strip()
+                        parts = [p for p in raw.replace(",", " ").split() if p]
+                        indices = [int(p) for p in parts]
+                        print("[clarify] 选择索引:", indices)
+                        handler2 = TokenUsageHandler()
+                        cn_cb2 = ChineseConsoleCallback(lang=args.lang)
+                        chain_start2 = time.perf_counter()
+                        route_result2 = router.execute(q_text, lang=args.lang, callbacks=[handler2, cn_cb2], clarify_choice={"indices": indices})
+                        chain_elapsed2 = time.perf_counter() - chain_start2
+                        final_text2 = route_result2.get("final_text") or extract_agent_output(route_result2.get("outputs"))
+                        print(f"[metrics] 本轮链用时 {chain_elapsed2:.3f}s，LLM用时 {handler2.llm_runtime_sec:.3f}s，LLM调用数 {handler2.llm_calls}，tokens {handler2.total_tokens}（prompt {handler2.prompt_tokens}, completion {handler2.completion_tokens}）")
+                        print("\n[LLM] ", final_text2)
+                    except Exception as e:
+                        print("[error] 澄清执行失败：", e)
+                else:
+                    print("\n[hint] 使用 --clarify 传入索引列表以继续，如: --clarify '0,2'")
+            else:
+                final_text = route_result.get("final_text") or extract_agent_output(route_result.get("outputs"))
+                print(f"[metrics] 本轮链用时 {chain_elapsed:.3f}s，LLM用时 {handler.llm_runtime_sec:.3f}s，LLM调用数 {handler.llm_calls}，tokens {handler.total_tokens}（prompt {handler.prompt_tokens}, completion {handler.completion_tokens}）")
+                print("\n[LLM] ", final_text)
+                # Optional evals (sampled and guarded)
+                eval_res = None
+                try:
+                    eval_res = maybe_run_evals(args.question, final_text, route_result.get("outputs") or [], {"mode": "non_interactive", "clarified": False})
+                except Exception:
+                    eval_res = None
+                # Per-query report (JSON)
+                try:
+                    rep = {
+                        "question": args.question,
+                        "final_text": final_text,
+                        "metrics": {
+                            "chain_elapsed_sec": chain_elapsed,
+                            "llm_elapsed_sec": handler.llm_runtime_sec,
+                            "llm_calls": handler.llm_calls,
+                            "prompt_tokens": handler.prompt_tokens,
+                            "completion_tokens": handler.completion_tokens,
+                            "total_tokens": handler.total_tokens,
+                        },
+                        "plan": plan_info,
+                        "sources": [o.get("source") for o in (route_result.get("outputs") or []) if isinstance(o, dict)],
+                        "evals": eval_res,
+                        "base_url": active_base_url,
+                        "lang": args.lang,
+                        "clarified": False,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
+                    _write_per_query_report(getattr(args, "report_dir", ""), rep)
+                except Exception:
+                    pass
         except Exception as e:
             print("[error] 调用失败：", e)
             sys.exit(1)
@@ -207,9 +295,98 @@ def main():
             strategy = plan_info.get("strategy")
             if strategy:
                 print("[route] 策略:", strategy)
-            final_text = route_result.get("final_text") or extract_agent_output(route_result.get("outputs"))
-            print(f"[metrics] 本轮链用时 {chain_elapsed:.3f}s，LLM用时 {handler.llm_runtime_sec:.3f}s，LLM调用数 {handler.llm_calls}，tokens {handler.total_tokens}（prompt {handler.prompt_tokens}, completion {handler.completion_tokens}）")
-            print("\n[LLM] ", final_text)
+            needs = route_result.get("needs_clarification")
+            if needs:
+                clar = route_result.get("clarification") or {}
+                msg = clar.get("message") or "需要澄清以继续查询。"
+                options = clar.get("options") or []
+                print("\n[clarify] ", msg)
+                if options:
+                    print("[options]")
+                    for o in options:
+                        print(f"  {o.get('index')}. {o.get('label')}")
+                # 交互式读取索引列表
+                raw = read_line("[clarify] 选择索引（逗号或空格分隔，回车跳过）: ").strip()
+                if raw:
+                    try:
+                        parts = [p for p in raw.replace(",", " ").split() if p]
+                        indices = [int(p) for p in parts]
+                        handler2 = TokenUsageHandler()
+                        cn_cb2 = ChineseConsoleCallback(lang=args.lang)
+                        chain_start2 = time.perf_counter()
+                        route_result2 = router.execute(q_text, lang=args.lang, callbacks=[handler2, cn_cb2], clarify_choice={"indices": indices})
+                        chain_elapsed2 = time.perf_counter() - chain_start2
+                        final_text2 = route_result2.get("final_text") or extract_agent_output(route_result2.get("outputs"))
+                        print(f"[metrics] 本轮链用时 {chain_elapsed2:.3f}s，LLM用时 {handler2.llm_runtime_sec:.3f}s，LLM调用数 {handler2.llm_calls}，tokens {handler2.total_tokens}（prompt {handler2.prompt_tokens}, completion {handler2.completion_tokens}）")
+                        print("\n[LLM] ", final_text2)
+                        # Optional evals
+                        eval_res2 = None
+                        try:
+                            eval_res2 = maybe_run_evals(question, final_text2, route_result2.get("outputs") or [], {"mode": "interactive", "clarified": True})
+                        except Exception:
+                            eval_res2 = None
+                        # Per-query report
+                        try:
+                            rep2 = {
+                                "question": question,
+                                "final_text": final_text2,
+                                "metrics": {
+                                    "chain_elapsed_sec": chain_elapsed2,
+                                    "llm_elapsed_sec": handler2.llm_runtime_sec,
+                                    "llm_calls": handler2.llm_calls,
+                                    "prompt_tokens": handler2.prompt_tokens,
+                                    "completion_tokens": handler2.completion_tokens,
+                                    "total_tokens": handler2.total_tokens,
+                                },
+                                "plan": route_result2.get("plan", {}),
+                                "sources": [o.get("source") for o in (route_result2.get("outputs") or []) if isinstance(o, dict)],
+                                "evals": eval_res2,
+                                "base_url": active_base_url,
+                                "lang": args.lang,
+                                "clarified": True,
+                                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                            }
+                            _write_per_query_report(getattr(args, "report_dir", ""), rep2)
+                        except Exception:
+                            pass
+                    except Exception as e:
+                        print("[error] 澄清执行失败：", e)
+                else:
+                    print("[info] 跳过澄清，本次不继续 SQL 查询。")
+            else:
+                final_text = route_result.get("final_text") or extract_agent_output(route_result.get("outputs"))
+                print(f"[metrics] 本轮链用时 {chain_elapsed:.3f}s，LLM用时 {handler.llm_runtime_sec:.3f}s，LLM调用数 {handler.llm_calls}，tokens {handler.total_tokens}（prompt {handler.prompt_tokens}, completion {handler.completion_tokens}）")
+                print("\n[LLM] ", final_text)
+                # Optional evals
+                eval_res3 = None
+                try:
+                    eval_res3 = maybe_run_evals(question, final_text, route_result.get("outputs") or [], {"mode": "interactive", "clarified": False})
+                except Exception:
+                    eval_res3 = None
+                # Per-query report
+                try:
+                    rep3 = {
+                        "question": question,
+                        "final_text": final_text,
+                        "metrics": {
+                            "chain_elapsed_sec": chain_elapsed,
+                            "llm_elapsed_sec": handler.llm_runtime_sec,
+                            "llm_calls": handler.llm_calls,
+                            "prompt_tokens": handler.prompt_tokens,
+                            "completion_tokens": handler.completion_tokens,
+                            "total_tokens": handler.total_tokens,
+                        },
+                        "plan": plan_info,
+                        "sources": [o.get("source") for o in (route_result.get("outputs") or []) if isinstance(o, dict)],
+                        "evals": eval_res3,
+                        "base_url": active_base_url,
+                        "lang": args.lang,
+                        "clarified": False,
+                        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
+                    }
+                    _write_per_query_report(getattr(args, "report_dir", ""), rep3)
+                except Exception:
+                    pass
             print()
             session_questions += 1
             session_llm_calls += handler.llm_calls

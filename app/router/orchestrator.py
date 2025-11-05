@@ -9,7 +9,7 @@ from app.prompts import (
     build_evidence_summarizer_prompt,
 )
 
-from app.config.settings import API_KEY, USE_LLM_PLANNER, SUMMARIZE_SINGLE_SOURCE, PROBE_CACHE_SECONDS, USE_LLM_SUMMARIZER, ROUTER_ENABLE_PROBE, PLAN_CACHE_SECONDS, REWRITE_CACHE_SECONDS, ROUTER_PARALLEL_EXECUTE
+from app.config.settings import API_KEY, USE_LLM_PLANNER, SUMMARIZE_SINGLE_SOURCE, PROBE_CACHE_SECONDS, USE_LLM_SUMMARIZER, ROUTER_ENABLE_PROBE, PLAN_CACHE_SECONDS, REWRITE_CACHE_SECONDS, ROUTER_PARALLEL_EXECUTE, RESULT_CACHE_SECONDS, CLARIFY_ENABLED, CLARIFY_CANDIDATE_THRESHOLD, CLARIFY_MAX_OPTIONS, SQL_YEAR_COLUMN_NAME
 from app.sources.base import DataSource
 
 
@@ -100,7 +100,7 @@ def extract_agent_output(payload) -> str:
 def localize_question(text: str, lang: str = "zh") -> str:
     source_notes = format_available_sources()
     schema_notes = format_schema_notes()
-    policy_zh = (
+    policy = (
         "【数据源使用政策】\n"
         "- 点位主数据通过 csv_lookup（CSV）获取。\n"
         "- 报警相关数据使用 alarm_event；历史曲线/时间段数据使用按点位拆分的历史表。\n"
@@ -108,34 +108,15 @@ def localize_question(text: str, lang: str = "zh") -> str:
         "- 如未提及年份，默认查询今年的数据。\n"
         "- 执行前尽量进行语句校验；结果应简洁并附来源。"
     )
-    policy_en = (
-        "[Source usage policy]\n"
-        "- Point master data is obtained from csv_lookup (CSV).\n"
-        "- Use alarm_event for alarms; use per-point history tables for time-series data.\n"
-        "- Do not enumerate tables; only access history when specific keys and time windows are provided, with row/time limits.\n"
-        "- If the year is not mentioned, default to the current year.\n"
-        "- Validate queries; keep answers concise with citations."
-    )
-    steps_zh = (
+    steps = (
         "【任务流程提醒】\n"
-        "1. 先基于可用数据源制定计划，至少选择一个来源。\n"
-        "2. 如需点位主数据，调用 csv_lookup（CSV）；如需历史/报警数据，调用 sql_database。\n"
-        "3. 多源场景下按计划串行执行，并在最终回答中整合来源信息。"
+        "1. 基于可用数据源制定计划，至少选择一个来源。\n"
+        "2. 点位主数据用 csv_lookup（CSV）；历史/报警数据用 sql_database。\n"
+        "3. 多源场景按计划执行，并在最终回答中整合来源信息。"
     )
-    steps_en = (
-        "[Workflow reminder]\n"
-        "1. Form a plan against the available sources and select at least one.\n"
-        "2. Use csv_lookup (CSV) for point master data; use sql_database for history/alarms.\n"
-        "3. When multiple sources are involved, execute sequentially and consolidate the answer."
-    )
-    if lang == "zh":
-        return (
-            f"请用简体中文回答：\n{policy_zh}\n{steps_zh}\n【可用数据源】\n"
-            f"{source_notes['zh']}\n{schema_notes['zh']}\n现在的问题：{text}"
-        )
     return (
-        f"Please answer in English.\n{policy_en}\n{steps_en}\n[Available sources]\n"
-        f"{source_notes['en']}\n{schema_notes['en']}\nQuestion: {text}"
+        f"请用简体中文回答：\n{policy}\n{steps}\n【可用数据源】\n"
+        f"{source_notes['zh']}\n{schema_notes['zh']}\n现在的问题：{text}"
     )
 
 
@@ -151,6 +132,8 @@ class RoutingOrchestrator:
         self._plan_cache: Dict[str, Tuple[float, Dict[str, Any], str]] = {}
         # short-lived rewrite cache
         self._rewrite_cache: Dict[str, Tuple[float, str]] = {}
+        # short-lived per-source result cache (keyed by lang|source|rewritten_query)
+        self._result_cache: Dict[str, Tuple[float, Any, str]] = {}
 
     # --- Static heuristics: pre-filter and ordering ---
     @staticmethod
@@ -280,78 +263,89 @@ class RoutingOrchestrator:
         except Exception:
             return None
 
+    def _format_candidate_label(self, c: Dict[str, str]) -> str:
+        # 统一构造选项标签：优先 point_name(code) | table_name | desc
+        name = c.get("point_name") or c.get("name") or ""
+        code = c.get("code") or ""
+        tbl = c.get("table_name") or ""
+        desc = c.get("desc") or c.get("tag_name") or ""
+        parts = []
+        if name or code:
+            if name and code:
+                parts.append(f"{name}({code})")
+            elif name:
+                parts.append(name)
+            else:
+                parts.append(code)
+        if tbl:
+            parts.append(tbl)
+        if desc:
+            parts.append(desc)
+        return " | ".join([p for p in parts if p])
+
+    def _build_clarification_payload(self, candidates: List[Dict[str, str]], question: str, max_options: int) -> Dict[str, Any]:
+        # 限制选项数量，生成友好中文提示和离线选项列表
+        sliced = candidates[:max_options]
+        options = []
+        for idx, c in enumerate(sliced):
+            options.append({
+                "index": idx,
+                "label": self._format_candidate_label(c) or f"候选 {idx+1}",
+                "data": c,
+            })
+        msg = (
+            "检测到多个可能的点位/对象。为避免盲目枚举查询，请先从下列候选中选择，以便精确检索：\n"
+            + "\n".join([f"{o['index']}. {o['label']}" for o in options])
+            + "\n\n请返回所选索引列表，如：clarify_choice={'indices':[0]}。"
+        )
+        return {"message": msg, "options": options, "question": question}
+
     @staticmethod
     def _rewrite_for_csv(question: str, lang: str, intent: Dict[str, Any]) -> str:
         keys = RoutingOrchestrator._candidate_bridge_keys()
         keys_text = ", ".join(keys)
-        if lang == "zh":
-            return (
-                "请使用点位主数据 CSV(csv_lookup) 检索与问题相关的信息，并返回结构化候选。"
-                "优先包含字段：point_name、code、desc(描述)、unit(单位)、type(类型)、threshold(阈值)，以及可能的桥接列集合："
-                f"{keys_text}。"
-                "如无法确定精确点位，请基于名称/描述进行合理匹配，但避免仅返回自由文本；"
-                "尽量给出候选对象（含可作为后续 SQL 过滤的列值）。"
-                "注意：禁止访问其他本地文件，仅使用已加载的 DataFrame。"
-                "如问题涉及时间但未提及年份，默认查询今年的数据。"
-                "原始问题：" + question
-            )
         return (
-            "Use the point master CSV (csv_lookup) to retrieve relevant info and return structured candidates. "
-            "Prefer fields: point_name, code, desc(description), unit, type, threshold, and include likely bridge keys: "
-            f"{keys_text}. "
-            "If exact point is unclear, do reasonable match by name/desc; avoid returning only free text—"
-            "provide candidate objects with columns usable for later SQL filtering. "
-            "Do not access other local files; use only the in-memory DataFrame. "
-            "If the query implies time but no year is mentioned, default to the current year. "
-            "Original question: " + question
+            "请使用点位主数据 CSV(csv_lookup) 检索与问题相关的信息，并返回结构化候选。"
+            "优先包含字段：point_name、code、desc(描述)、unit(单位)、type(类型)、threshold(阈值)，以及可能的桥接列集合："
+            f"{keys_text}。"
+            "如无法确定精确点位，请基于名称/描述进行合理匹配，但避免仅返回自由文本；"
+            "尽量给出候选对象（含可作为后续 SQL 过滤的列值）。"
+            "注意：禁止访问其他本地文件，仅使用已加载的 DataFrame。"
+            "如问题涉及时间但未提及年份，默认查询今年的数据。"
+            "原始问题：" + question
         )
 
     @staticmethod
     def _rewrite_for_sql(question: str, lang: str, intent: Dict[str, Any], context: Optional[Dict[str, Any]] = None) -> str:
         keys = RoutingOrchestrator._candidate_bridge_keys()
         keys_text = ", ".join(keys)
+        import datetime
+        now_year = datetime.datetime.now().astimezone().year
         csv_hint = ""
         if context and isinstance(context.get("csv_text"), str):
-            # 适度截断，避免提示过长
             t = context["csv_text"].strip()
             csv_hint = t[:500] + ("…" if len(t) > 500 else "")
         json_hint = ""
         if context and isinstance(context.get("csv_candidates_json"), str) and context.get("csv_candidates_json"):
             j = context["csv_candidates_json"].strip()
             json_hint = j[:800] + ("…" if len(j) > 800 else "")
-        if lang == "zh":
-            base = (
-                "请使用工业数据库(sql_database)回答。点位主数据由 CSV(csv_lookup) 提供。"
-                "如需报警或历史数据：使用 alarm_event（报警总表）与按点位拆分的历史表。"
-                "访问历史表应基于明确的检索键与时间窗口，限制返回条数。"
-                "若 point_data.table_name 可用，优先据此定位目标历史表；过滤时优先使用 point_name 与 code。"
-                "如未提及年份，默认查询今年的数据。"
-            )
-            if csv_hint and json_hint:
-                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint} 与 JSON 候选：{json_hint}。"
-            elif csv_hint:
-                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint}。"
-            elif json_hint:
-                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 JSON 候选：{json_hint}。"
-            else:
-                bridge = f"优先使用桥接列进行过滤（例如 {keys_text}）。"
-            return base + " " + bridge + " 原始问题：" + question
         base = (
-            "Use the industrial SQL database. Point master data comes from the CSV (opcae_lookup). "
-            "For alarms or history, use alarm_event and per-point history tables. "
-            "Access history tables based on specific keys and time windows; limit returned rows. "
-            "When point_data.table_name is available, prefer using it to select the target history table; prioritize filtering by point_name and code. "
-            "If the year is not mentioned, default to the current year. "
+            "请使用工业数据库(sql_database)回答。点位主数据由 CSV(csv_lookup) 提供。"
+            "如需报警或历史数据：使用 alarm_event（报警总表）与按点位拆分的历史表。"
+            "访问历史表应基于明确的检索键与时间窗口，限制返回条数。"
+            "若 point_data.table_name 可用，优先据此定位目标历史表；过滤时优先使用 point_name 与 code。"
+            f"如未提及年份，默认查询今年的数据（当前年份：{now_year}）。"
+            f"在 SQL 中显式加入年份过滤，例如 EXTRACT(YEAR FROM {SQL_YEAR_COLUMN_NAME or 'ts'}) = {now_year}。"
         )
         if csv_hint and json_hint:
-            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider CSV candidates: {csv_hint} and JSON candidates: {json_hint}. "
+            bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint} 与 JSON 候选：{json_hint}。"
         elif csv_hint:
-            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider CSV candidates: {csv_hint}. "
+            bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 CSV 候选：{csv_hint}。"
         elif json_hint:
-            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}); consider JSON candidates: {json_hint}. "
+            bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 JSON 候选：{json_hint}。"
         else:
-            bridge = f"Prefer filtering via bridge keys (e.g., {keys_text}). "
-        return base + bridge + " Original question: " + question
+            bridge = f"优先使用桥接列进行过滤（例如 {keys_text}）。"
+        return base + " " + bridge + " 原始问题：" + question
 
     def _rewrite_queries_for_sources(self, question: str, ordered_sources: List[str], lang: str) -> Dict[str, str]:
         intent = self._detect_intent(question, lang)
@@ -470,18 +464,6 @@ class RoutingOrchestrator:
             if src:
                 available_lines.append(f"- {src.short_info()}")
         available_text = "\n".join(available_lines) if available_lines else available
-        system_text = (
-            "You are a routing planner. Choose the best data sources to answer industrial QA queries. "
-            "Respond in strict JSON with keys: ordered_sources (list of source names in execution order) "
-            "and strategy (short reasoning). Use only source names provided. Always include at least one source."
-        )
-        human_text = (
-            "User language: {lang}\n"
-            "Question: {question}\n"
-            "Available sources:\n{available}\n"
-            "Return JSON: {{\"ordered_sources\": [\"name\"...], \"strategy\": \"...\"}}\n"
-            "Example: {example_json}"
-        )
         example_json = '{"ordered_sources": ["csv_lookup", "sql_database"], "strategy": "先查CSV点位，再查数据库历史"}'
         prompt = build_routing_planner_prompt()
         if use_llm:
@@ -556,6 +538,7 @@ class RoutingOrchestrator:
         *,
         lang: str = "zh",
         callbacks: Optional[Sequence[BaseCallbackHandler]] = None,
+        clarify_choice: Optional[Dict[str, Any]] = None,
     ):
         plan_data, raw_plan = self.plan_sources(question, lang, callbacks=callbacks)
         ordered_sources = plan_data.get("ordered_sources", [])
@@ -582,8 +565,17 @@ class RoutingOrchestrator:
                 try:
                     # 对 SQL 无上下文的情形使用预重写
                     q = rewritten.get(name, question)
-                    result = await asyncio.to_thread(src.run, q, callbacks=callbacks)
-                    text = extract_agent_output(result)
+                    # 结果缓存命中
+                    import time
+                    now_ts = time.time()
+                    ck = f"{lang}|{name}|{q}"
+                    cached = self._result_cache.get(ck)
+                    if cached and (now_ts - cached[0]) <= RESULT_CACHE_SECONDS:
+                        result, text = cached[1], cached[2]
+                    else:
+                        result = await asyncio.to_thread(src.run, q, callbacks=callbacks)
+                        text = extract_agent_output(result)
+                        self._result_cache[ck] = (now_ts, result, text)
                 except Exception as exc:
                     result = None
                     text = f"[error] {exc}"
@@ -634,6 +626,39 @@ class RoutingOrchestrator:
                                 csv_json = RoutingOrchestrator._extract_csv_candidates(last_csv.get("raw"))
                         except Exception:
                             csv_json = None
+
+                        # —— 澄清分支：候选过多时先返回选项，避免枚举查询 ——
+                        csv_candidates_list: List[Dict[str, str]] = []
+                        try:
+                            if csv_json:
+                                csv_candidates_list = json.loads(csv_json)
+                        except Exception:
+                            csv_candidates_list = []
+
+                        # 若候选过多且未提供用户选择，则返回澄清载荷并终止后续 SQL 查询
+                        if CLARIFY_ENABLED and len(csv_candidates_list) >= CLARIFY_CANDIDATE_THRESHOLD and not clarify_choice:
+                            payload = self._build_clarification_payload(csv_candidates_list, question, CLARIFY_MAX_OPTIONS)
+                            final_text = payload["message"]
+                            return {
+                                "plan": plan_data,
+                                "plan_raw": raw_plan,
+                                "probe": probe_info,
+                                "outputs": outputs,  # 已包含 CSV 阶段结果
+                                "final_text": final_text,
+                                "needs_clarification": True,
+                                "clarification": payload,
+                            }
+
+                        # 若提供了选择，则按选择缩小候选范围后再进行 SQL 重写
+                        if clarify_choice and csv_candidates_list:
+                            indices = clarify_choice.get("indices") or []
+                            if isinstance(indices, list) and indices:
+                                filtered = [csv_candidates_list[i] for i in indices if 0 <= i < len(csv_candidates_list)]
+                                if filtered:
+                                    try:
+                                        csv_json = json.dumps(filtered, ensure_ascii=False)
+                                    except Exception:
+                                        pass
                         ctx = {
                             "csv_text": (last_csv.get("text") if last_csv else None),
                             "csv_candidates_json": csv_json,
@@ -657,8 +682,17 @@ class RoutingOrchestrator:
                     else:
                         # 非 SQL 使用预重写；SQL 在此考虑 CSV 上下文并带缓存
                         q = rewritten.get(name, question)
-                    result = src.run(q, callbacks=callbacks)
-                    text = extract_agent_output(result)
+                    # 结果缓存命中
+                    import time
+                    now_ts = time.time()
+                    rck = f"{lang}|{name}|{q}"
+                    rcached = self._result_cache.get(rck)
+                    if rcached and (now_ts - rcached[0]) <= RESULT_CACHE_SECONDS:
+                        result, text = rcached[1], rcached[2]
+                    else:
+                        result = src.run(q, callbacks=callbacks)
+                        text = extract_agent_output(result)
+                        self._result_cache[rck] = (now_ts, result, text)
                 except Exception as exc:
                     result = None
                     text = f"[error] {exc}"

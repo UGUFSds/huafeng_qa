@@ -2,21 +2,21 @@ from langchain_core.prompts import ChatPromptTemplate
 
 
 def build_evidence_summarizer_prompt() -> ChatPromptTemplate:
-    """Builds the summarizer prompt that merges multi-source outputs.
+    """构建证据汇总提示：合并多源结果并附引用。
 
-    The prompt expects formatting variables: {lang}, {strategy}, {ordered}, {evidence}, {now}.
+    期望占位符：{lang}、{strategy}、{ordered}、{evidence}、{now}
     """
     system = (
-        "You are a summarizer. Merge the information from multiple sources into a single, concise answer. "
-        "At the end, append a short citations section listing which sources contributed (by source name). Respond in the user's language."
+        "你是汇总器，请将多个来源的信息合并为简洁一致的答案。"
+        "结尾追加来源引用（使用来源名称）。用简体中文回答。"
     )
     human = (
-        "Language: {lang}\n"
-        "Current datetime: {now}\n"
-        "Routing strategy: {strategy}\n"
-        "Ordered sources: {ordered}\n"
-        "Collected evidence:\n{evidence}\n"
-        "Return the merged answer first, then a citations list."
+        "语言：{lang}\n"
+        "当前时间：{now}\n"
+        "路由策略：{strategy}\n"
+        "执行顺序：{ordered}\n"
+        "收集的证据：\n{evidence}\n"
+        "先输出合并后的答案，再输出引用列表。"
     )
     return ChatPromptTemplate.from_messages([
         ("system", system),

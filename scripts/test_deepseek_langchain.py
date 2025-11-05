@@ -1,5 +1,13 @@
 import os
+import sys
 from dotenv import load_dotenv
+# 保证从 scripts/ 运行时可访问项目根目录
+try:
+    _ROOT = os.path.abspath(os.path.join(os.path.dirname(__file__), ".."))
+    if _ROOT not in sys.path:
+        sys.path.insert(0, _ROOT)
+except Exception:
+    pass
 from app.config.settings import BASE_URL, API_KEY, MODEL
 
 print(
