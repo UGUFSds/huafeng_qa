@@ -27,10 +27,14 @@ from app.config.settings import (
     DB_URI,
     OPCAE_CSV_PATH,
     EVALS_REPORT_DIR,
+    PHOENIX_ENABLED,
+    PHOENIX_ENDPOINT,
+    PHOENIX_PROJECT_NAME,
+    COST_RATE_PER_1K_PROMPT,
+    COST_RATE_PER_1K_COMPLETION,
 )
 from app.llm.factory import build_llm
 from app.callbacks import TokenUsageHandler, ChineseConsoleCallback
-from app.monitor import maybe_run_evals
 
 # API Key 提示：本地运行使用提供方 API，如缺少 Key 可能无法调用
 if not API_KEY:
@@ -115,6 +119,15 @@ def main():
     print("[env] OPCAE_CSV_PATH=", OPCAE_CSV_PATH)
     if getattr(args, "report_dir", ""):
         print("[env] REPORT_DIR=", args.report_dir)
+    try:
+        if PHOENIX_ENABLED:
+            from app.observability.phoenix import init
+            init(PHOENIX_ENDPOINT)
+            print("[env] PHOENIX=enabled", PHOENIX_ENDPOINT, PHOENIX_PROJECT_NAME)
+        else:
+            print("[env] PHOENIX=disabled")
+    except Exception as _e:
+        print("[warn] Phoenix 初始化失败:", _e)
 
     # 根据 provider 选择 base_url；必要时回退到 /v1
     selected_base = INTERNAL_BASE_URL if PROVIDER in {"internal", "gateway"} else BASE_URL
@@ -141,6 +154,11 @@ def main():
     if csv_source:
         sources.append(csv_source)
     register_data_sources(sources)
+    try:
+        import atexit
+        atexit.register(lambda: getattr(sql_source, "dispose", None) and sql_source.dispose())
+    except Exception:
+        pass
     print("[env] AVAILABLE_SOURCES=")
     for src in sources:
         print(f"  - {src.short_info()}")
@@ -212,14 +230,20 @@ def main():
                 final_text = route_result.get("final_text") or extract_agent_output(route_result.get("outputs"))
                 print(f"[metrics] 本轮链用时 {chain_elapsed:.3f}s，LLM用时 {handler.llm_runtime_sec:.3f}s，LLM调用数 {handler.llm_calls}，tokens {handler.total_tokens}（prompt {handler.prompt_tokens}, completion {handler.completion_tokens}）")
                 print("\n[LLM] ", final_text)
-                # Optional evals (sampled and guarded)
-                eval_res = None
-                try:
-                    eval_res = maybe_run_evals(args.question, final_text, route_result.get("outputs") or [], {"mode": "non_interactive", "clarified": False})
-                except Exception:
-                    eval_res = None
                 # Per-query report (JSON)
                 try:
+                    outs = route_result.get("outputs") or []
+                    steps = []
+                    for o in outs:
+                        if isinstance(o, dict):
+                            m = o.get("meta") or {}
+                            steps.append({
+                                "source": o.get("source"),
+                                "duration_sec": m.get("duration_sec"),
+                                "rows_count": m.get("rows_count"),
+                                "status": "error" if str(o.get("text") or "").startswith("[error]") else "ok",
+                                "output_preview": (str(o.get("text") or "")[:200]),
+                            })
                     rep = {
                         "question": args.question,
                         "final_text": final_text,
@@ -233,12 +257,24 @@ def main():
                         },
                         "plan": plan_info,
                         "sources": [o.get("source") for o in (route_result.get("outputs") or []) if isinstance(o, dict)],
-                        "evals": eval_res,
+                        "steps": steps,
+                        "cost": {
+                            "usd": (handler.prompt_tokens/1000.0)*COST_RATE_PER_1K_PROMPT + (handler.completion_tokens/1000.0)*COST_RATE_PER_1K_COMPLETION,
+                            "prompt_tokens": handler.prompt_tokens,
+                            "completion_tokens": handler.completion_tokens,
+                        },
                         "base_url": active_base_url,
                         "lang": args.lang,
                         "clarified": False,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                     }
+                    try:
+                        from app.observability.phoenix import evaluate, record_eval
+                        evals = evaluate(active_base_url, args.question, final_text, args.lang)
+                        rep["evals"] = evals
+                        record_eval(evals, rep)
+                    except Exception:
+                        pass
                     _write_per_query_report(getattr(args, "report_dir", ""), rep)
                 except Exception:
                     pass
@@ -319,14 +355,25 @@ def main():
                         final_text2 = route_result2.get("final_text") or extract_agent_output(route_result2.get("outputs"))
                         print(f"[metrics] 本轮链用时 {chain_elapsed2:.3f}s，LLM用时 {handler2.llm_runtime_sec:.3f}s，LLM调用数 {handler2.llm_calls}，tokens {handler2.total_tokens}（prompt {handler2.prompt_tokens}, completion {handler2.completion_tokens}）")
                         print("\n[LLM] ", final_text2)
-                        # Optional evals
-                        eval_res2 = None
-                        try:
-                            eval_res2 = maybe_run_evals(question, final_text2, route_result2.get("outputs") or [], {"mode": "interactive", "clarified": True})
-                        except Exception:
-                            eval_res2 = None
                         # Per-query report
                         try:
+                            outs2 = route_result2.get("outputs") or []
+                            steps2 = []
+                            for o in outs2:
+                                if isinstance(o, dict):
+                                    m = o.get("meta") or {}
+                                    steps2.append({
+                                        "source": o.get("source"),
+                                        "duration_sec": m.get("duration_sec"),
+                                        "rows_count": m.get("rows_count"),
+                                        "status": "error" if str(o.get("text") or "").startswith("[error]") else "ok",
+                                        "output_preview": (str(o.get("text") or "")[:200]),
+                                    })
+                            try:
+                                selected = route_result2.get("selected_candidates") or []
+                                allowed_tables = set([str(c.get("table_name")) for c in selected if isinstance(c, dict) and c.get("table_name")])
+                            except Exception:
+                                allowed_tables = set()
                             rep2 = {
                                 "question": question,
                                 "final_text": final_text2,
@@ -340,12 +387,27 @@ def main():
                                 },
                                 "plan": route_result2.get("plan", {}),
                                 "sources": [o.get("source") for o in (route_result2.get("outputs") or []) if isinstance(o, dict)],
-                                "evals": eval_res2,
+                                "steps": steps2,
+                                "source_coverage": {
+                                    "allowed_tables": list(allowed_tables),
+                                },
+                                "cost": {
+                                    "usd": (handler2.prompt_tokens/1000.0)*COST_RATE_PER_1K_PROMPT + (handler2.completion_tokens/1000.0)*COST_RATE_PER_1K_COMPLETION,
+                                    "prompt_tokens": handler2.prompt_tokens,
+                                    "completion_tokens": handler2.completion_tokens,
+                                },
                                 "base_url": active_base_url,
                                 "lang": args.lang,
                                 "clarified": True,
                                 "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                             }
+                            try:
+                                from app.observability.phoenix import evaluate, record_eval
+                                evals2 = evaluate(active_base_url, question, final_text2, args.lang)
+                                rep2["evals"] = evals2
+                                record_eval(evals2, rep2)
+                            except Exception:
+                                pass
                             _write_per_query_report(getattr(args, "report_dir", ""), rep2)
                         except Exception:
                             pass
@@ -357,14 +419,21 @@ def main():
                 final_text = route_result.get("final_text") or extract_agent_output(route_result.get("outputs"))
                 print(f"[metrics] 本轮链用时 {chain_elapsed:.3f}s，LLM用时 {handler.llm_runtime_sec:.3f}s，LLM调用数 {handler.llm_calls}，tokens {handler.total_tokens}（prompt {handler.prompt_tokens}, completion {handler.completion_tokens}）")
                 print("\n[LLM] ", final_text)
-                # Optional evals
-                eval_res3 = None
-                try:
-                    eval_res3 = maybe_run_evals(question, final_text, route_result.get("outputs") or [], {"mode": "interactive", "clarified": False})
-                except Exception:
-                    eval_res3 = None
                 # Per-query report
                 try:
+                    outs3 = route_result.get("outputs") or []
+                    steps3 = []
+                    for o in outs3:
+                        if isinstance(o, dict):
+                            m = o.get("meta") or {}
+                            steps3.append({
+                                "source": o.get("source"),
+                                "duration_sec": m.get("duration_sec"),
+                                "rows_count": m.get("rows_count"),
+                                "status": "error" if str(o.get("text") or "").startswith("[error]") else "ok",
+                                "output_preview": (str(o.get("text") or "")[:200]),
+                            })
+                    source_cov3 = {}
                     rep3 = {
                         "question": question,
                         "final_text": final_text,
@@ -378,12 +447,25 @@ def main():
                         },
                         "plan": plan_info,
                         "sources": [o.get("source") for o in (route_result.get("outputs") or []) if isinstance(o, dict)],
-                        "evals": eval_res3,
+                        "steps": steps3,
+                        "source_coverage": source_cov3,
+                        "cost": {
+                            "usd": (handler.prompt_tokens/1000.0)*COST_RATE_PER_1K_PROMPT + (handler.completion_tokens/1000.0)*COST_RATE_PER_1K_COMPLETION,
+                            "prompt_tokens": handler.prompt_tokens,
+                            "completion_tokens": handler.completion_tokens,
+                        },
                         "base_url": active_base_url,
                         "lang": args.lang,
                         "clarified": False,
                         "timestamp": time.strftime("%Y-%m-%dT%H:%M:%S"),
                     }
+                    try:
+                        from app.observability.phoenix import evaluate, record_eval
+                        evals3 = evaluate(active_base_url, question, final_text, args.lang)
+                        rep3["evals"] = evals3
+                        record_eval(evals3, rep3)
+                    except Exception:
+                        pass
                     _write_per_query_report(getattr(args, "report_dir", ""), rep3)
                 except Exception:
                     pass

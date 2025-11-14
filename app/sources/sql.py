@@ -12,6 +12,13 @@ from app.config.settings import DB_URI, PG_DB, PG_HOST, PG_PORT, SQL_AGENT_MAX_I
 
 # Holds the original user question during a single SQL agent run
 _CURRENT_ROUTED_QUESTION: ContextVar[str] = ContextVar("_CURRENT_ROUTED_QUESTION", default="")
+_ALLOWED_TABLES: ContextVar[list] = ContextVar("_ALLOWED_TABLES", default=[])
+
+def set_allowed_tables(tables):
+    try:
+        _ALLOWED_TABLES.set(list(tables or []))
+    except Exception:
+        _ALLOWED_TABLES.set([])
 
 
 class SqlDataSource(DataSource):
@@ -56,6 +63,14 @@ class SqlDataSource(DataSource):
         except Exception as exc:
             return f"[probe-error] {exc}"
 
+    def dispose(self) -> None:
+        try:
+            eng = getattr(self._db, "_engine", None) or getattr(self._db, "engine", None)
+            if eng:
+                eng.dispose()
+        except Exception:
+            pass
+
 
 def build_sql_source(base_url: str, max_iterations: int = SQL_AGENT_MAX_ITERATIONS) -> SqlDataSource:
     """构建 SQL 数据源，屏蔽不应访问的表并返回包装后的 DataSource。"""
@@ -64,6 +79,16 @@ def build_sql_source(base_url: str, max_iterations: int = SQL_AGENT_MAX_ITERATIO
         DB_URI,
         ignore_tables=["point_data"],
         sample_rows_in_table_info=SQL_TABLE_INFO_SAMPLE_ROWS,
+        engine_args={
+            "pool_pre_ping": True,
+            "pool_recycle": 1800,
+            "pool_size": 5,
+            "max_overflow": 10,
+            "connect_args": {
+                "connect_timeout": 5,
+                "options": "-c statement_timeout=5000",
+            },
+        },
     )
     # 轻量缓存 table_info，减少重复自省开销
     try:
@@ -156,6 +181,19 @@ def build_sql_source(base_url: str, max_iterations: int = SQL_AGENT_MAX_ITERATIO
             return _orig_run(q2, *args, **kwargs)
 
         db.run = _guarded_run  # type: ignore
+    except Exception:
+        pass
+    try:
+        _orig_get_usable = db.get_usable_table_names
+
+        def _filtered_usable():
+            allowed = _ALLOWED_TABLES.get()
+            names = list(_orig_get_usable())
+            if allowed:
+                return [n for n in names if n in allowed]
+            return names
+
+        db.get_usable_table_names = _filtered_usable  # type: ignore
     except Exception:
         pass
     llm = build_llm(base_url)

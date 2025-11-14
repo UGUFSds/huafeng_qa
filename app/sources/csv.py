@@ -17,7 +17,7 @@ except ImportError:
 
 from app.sources.base import DataSource
 from app.llm.factory import build_llm
-from app.config.settings import OPCAE_CSV_PATH, CSV_AGENT_SECOND_PASS
+from app.config.settings import OPCAE_CSV_PATH, CSV_AGENT_SECOND_PASS, CSV_FALLBACK_AUTO_FILTER
 from app.prompts.csv_tools import build_csv_tools_prompt
 
 
@@ -232,9 +232,9 @@ class SimpleCsvToolsAgent:
                         return {"output": str(short), "data": data_out}
                     tm = ToolMessage(content=json.dumps(data_out, ensure_ascii=False), tool_call_id=str(call_id))
                     follow_messages = list(messages) + [AIMessage(content=getattr(resp, "content", ""), tool_calls=tool_calls), tm]
-                    final = self.llm.invoke(follow_messages, config=config) if config else self.llm.invoke(follow_messages)
-                    return {"output": getattr(final, "content", str(final)), "data": data_out}
-
+                final = self.llm.invoke(follow_messages, config=config) if config else self.llm.invoke(follow_messages)
+                return {"output": getattr(final, "content", str(final)), "data": data_out}
+        
         # Fallback: parse DeepSeek-style inline tool call markup in text content
         content_text = getattr(resp, "content", "") or ""
         ds_calls = self._parse_inline_tool_calls(content_text)
@@ -263,6 +263,43 @@ class SimpleCsvToolsAgent:
                 follow_messages = list(messages) + [AIMessage(content=content_text), tm]
                 final = self.llm.invoke(follow_messages, config=config) if config else self.llm.invoke(follow_messages)
                 return {"output": getattr(final, "content", str(final)), "data": data_out}
+        if CSV_FALLBACK_AUTO_FILTER and data_out is None:
+            try:
+                txt = (human or "")
+                base_kws = re.findall(r"[A-Za-z0-9_\-]{3,}", txt)
+                base_kws = list(dict.fromkeys(base_kws))
+                extra_kws = ["RA2", "VICRA", "VISC", "VIS", "L3210C", "粘度"]
+                kws = []
+                for k in base_kws:
+                    if k.upper() not in kws:
+                        kws.append(k.upper())
+                for k in extra_kws:
+                    if k.upper() not in kws:
+                        kws.append(k.upper())
+                kws = kws[:5]
+                primary_cols = ["point_name", "code", "table_name"]
+                secondary_cols = ["desc", "tag_name", "name"]
+                masks = []
+                cols = [c for c in primary_cols + secondary_cols if c in self.df.columns]
+                for c in cols:
+                    s = self.df[c].astype(str).str.upper()
+                    m = None
+                    for kw in kws:
+                        cur = s.str.contains(str(kw), case=False, na=False)
+                        m = cur if m is None else (m | cur)
+                    if m is not None:
+                        masks.append(m)
+                if masks:
+                    mask = masks[0]
+                    for m in masks[1:]:
+                        mask = mask | m
+                    d = self.df[mask]
+                    out = d.head(20)
+                    data_out = {"rows": out.to_dict(orient="records"), "count": int(out.shape[0])}
+                    short = f"CSV candidates: rows={data_out['count']} groups=0"
+                    return {"output": short, "data": data_out}
+            except Exception:
+                pass
         return {"output": getattr(resp, "content", str(resp)), "data": data_out}
 
     @staticmethod

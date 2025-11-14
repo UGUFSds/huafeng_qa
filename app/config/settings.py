@@ -52,9 +52,9 @@ ROUTER_ENABLE_PROBE = _env_any(["ROUTER_ENABLE_PROBE"], default="1").strip() in 
 # 并发执行多源以提高吞吐（在存在 CSV→SQL 依赖时自动串行）
 ROUTER_PARALLEL_EXECUTE = _env_any(["ROUTER_PARALLEL_EXECUTE"], default="1").strip() in ("1", "true", "True")
 # Short caches in seconds to avoid repeated introspection/prompts
-PROBE_CACHE_SECONDS = int(_env_any(["ROUTER_PROBE_CACHE_SECONDS"], default="60"))
+PROBE_CACHE_SECONDS = int(_env_any(["ROUTER_PROBE_CACHE_SECONDS"], default="120"))
 PLAN_CACHE_SECONDS = int(_env_any(["ROUTER_PLAN_CACHE_SECONDS"], default="300"))
-REWRITE_CACHE_SECONDS = int(_env_any(["ROUTER_REWRITE_CACHE_SECONDS"], default="300"))
+REWRITE_CACHE_SECONDS = int(_env_any(["ROUTER_REWRITE_CACHE_SECONDS"], default="600"))
 RESULT_CACHE_SECONDS = int(_env_any(["ROUTER_RESULT_CACHE_SECONDS"], default="600"))
 
 # SQL agent iteration cap and table sampling for faster planning/execution
@@ -63,7 +63,8 @@ SQL_TABLE_INFO_SAMPLE_ROWS = int(_env_any(["SQL_TABLE_INFO_SAMPLE_ROWS"], defaul
 SQL_TABLE_INFO_CACHE_SECONDS = int(_env_any(["SQL_TABLE_INFO_CACHE_SECONDS"], default="1200"))
 
 # CSV agent behavior
-CSV_AGENT_SECOND_PASS = _env_any(["CSV_AGENT_SECOND_PASS"], default="0").strip() in ("1", "true", "True")
+CSV_AGENT_SECOND_PASS = _env_any(["CSV_AGENT_SECOND_PASS"], default="1").strip() in ("1", "true", "True")
+CSV_FALLBACK_AUTO_FILTER = _env_any(["CSV_FALLBACK_AUTO_FILTER"], default="1").strip() in ("1", "true", "True")
 
 # Clarification (disambiguation) behavior to avoid enumerating queries
 CLARIFY_ENABLED = _env_any(["ROUTER_CLARIFY_ENABLED"], default="1").strip() in ("1", "true", "True")
@@ -75,13 +76,15 @@ CLARIFY_MAX_OPTIONS = int(_env_any(["ROUTER_CLARIFY_MAX_OPTIONS"], default="8"))
 SQL_ENFORCE_CURRENT_YEAR_IF_UNSPECIFIED = _env_any(["SQL_ENFORCE_CURRENT_YEAR_IF_UNSPECIFIED"], default="1").strip() in ("1", "true", "True")
 SQL_YEAR_COLUMN_NAME = _env_any(["SQL_YEAR_COLUMN_NAME"], default="ts").strip()
 
-# Phoenix Evals integration toggles (safe defaults)
-EVALS_ENABLED = _env_any(["EVALS_ENABLED"], default="0").strip() in ("1", "true", "True")
-EVALS_PROVIDER = _env_any(["EVALS_PROVIDER"], default="openai").strip()
-# Prefer explicit EVALS_MODEL; if unset, fall back to primary MODEL; finally default to gpt-4o
-_EVALS_MODEL_RAW = _env_any(["EVALS_MODEL"], default="").strip()
-EVALS_MODEL = (_EVALS_MODEL_RAW or MODEL or "gpt-4o").strip()
-EVALS_SAMPLING_RATE = float(_env_any(["EVALS_SAMPLING_RATE"], default="0.2"))
-EVALS_LOG_PATH = _env_any(["EVALS_LOG_PATH"], default=os.path.join("eval_logs", "phoenix_evals.jsonl")).strip()
-# Per-query report directory (optional). If set, service will write one JSON report per query.
+# Per-query report directory（可选）。若设置，service 将为每次查询写出 JSON 报告。
 EVALS_REPORT_DIR = _env_any(["EVALS_REPORT_DIR", "HUAFENG_EVALS_REPORT_DIR"], default="").strip()
+
+# Phoenix observability
+PHOENIX_ENABLED = _env_any(["PHOENIX_ENABLED"], default="0").strip() in ("1", "true", "True")
+PHOENIX_ENDPOINT = _env_any(["PHOENIX_ENDPOINT"], default="http://127.0.0.1:6006/v1/traces").strip()
+PHOENIX_PROJECT_NAME = _env_any(["PHOENIX_PROJECT_NAME"], default="huafeng-qa").strip()
+COST_RATE_PER_1K_PROMPT = float(_env_any(["COST_RATE_PER_1K_PROMPT"], default="0"))
+COST_RATE_PER_1K_COMPLETION = float(_env_any(["COST_RATE_PER_1K_COMPLETION"], default="0"))
+ROUTER_STRICT_AFTER_CLARIFICATION = _env_any(["ROUTER_STRICT_AFTER_CLARIFICATION"], default="1").strip() in ("1", "true", "True")
+COST_RATE_PER_1K_PROMPT = float(_env_any(["COST_RATE_PER_1K_PROMPT"], default="0"))
+COST_RATE_PER_1K_COMPLETION = float(_env_any(["COST_RATE_PER_1K_COMPLETION"], default="0"))

@@ -9,7 +9,7 @@ from app.prompts import (
     build_evidence_summarizer_prompt,
 )
 
-from app.config.settings import API_KEY, USE_LLM_PLANNER, SUMMARIZE_SINGLE_SOURCE, PROBE_CACHE_SECONDS, USE_LLM_SUMMARIZER, ROUTER_ENABLE_PROBE, PLAN_CACHE_SECONDS, REWRITE_CACHE_SECONDS, ROUTER_PARALLEL_EXECUTE, RESULT_CACHE_SECONDS, CLARIFY_ENABLED, CLARIFY_CANDIDATE_THRESHOLD, CLARIFY_MAX_OPTIONS, SQL_YEAR_COLUMN_NAME
+from app.config.settings import API_KEY, USE_LLM_PLANNER, SUMMARIZE_SINGLE_SOURCE, PROBE_CACHE_SECONDS, USE_LLM_SUMMARIZER, ROUTER_ENABLE_PROBE, PLAN_CACHE_SECONDS, REWRITE_CACHE_SECONDS, ROUTER_PARALLEL_EXECUTE, RESULT_CACHE_SECONDS, CLARIFY_ENABLED, CLARIFY_CANDIDATE_THRESHOLD, CLARIFY_MAX_OPTIONS, SQL_YEAR_COLUMN_NAME, ROUTER_STRICT_AFTER_CLARIFICATION
 from app.sources.base import DataSource
 
 
@@ -329,6 +329,12 @@ class RoutingOrchestrator:
         if context and isinstance(context.get("csv_candidates_json"), str) and context.get("csv_candidates_json"):
             j = context["csv_candidates_json"].strip()
             json_hint = j[:800] + ("…" if len(j) > 800 else "")
+        strict_tables = []
+        try:
+            if context and isinstance(context.get("strict_tables"), list):
+                strict_tables = [str(x) for x in context.get("strict_tables") if x]
+        except Exception:
+            strict_tables = []
         base = (
             "请使用工业数据库(sql_database)回答。点位主数据由 CSV(csv_lookup) 提供。"
             "如需报警或历史数据：使用 alarm_event（报警总表）与按点位拆分的历史表。"
@@ -345,7 +351,11 @@ class RoutingOrchestrator:
             bridge = f"优先使用桥接列进行过滤（例如 {keys_text}），并参考 JSON 候选：{json_hint}。"
         else:
             bridge = f"优先使用桥接列进行过滤（例如 {keys_text}）。"
-        return base + " " + bridge + " 原始问题：" + question
+        strict_clause = ""
+        if strict_tables:
+            joined = ", ".join([f'"{t}"' for t in strict_tables])
+            strict_clause = f" 仅限查询以下目标表：{joined}；不要扩展至相近或未列出的表。"
+        return base + " " + bridge + strict_clause + " 原始问题：" + question
 
     def _rewrite_queries_for_sources(self, question: str, ordered_sources: List[str], lang: str) -> Dict[str, str]:
         intent = self._detect_intent(question, lang)
@@ -546,6 +556,7 @@ class RoutingOrchestrator:
         self._notify(callbacks, "on_routing_plan", plan_data, raw_plan)
         self._notify(callbacks, "on_routing_probe", probe_info)
         outputs = []
+        csv_backfill_done = False
         # Per-source query rewriting
         rewritten = self._rewrite_queries_for_sources(question, ordered_sources, lang)
         # 并发执行：当不存在 CSV→SQL 的顺序依赖时尝试并行
@@ -567,6 +578,7 @@ class RoutingOrchestrator:
                     q = rewritten.get(name, question)
                     # 结果缓存命中
                     import time
+                    start_perf = time.perf_counter()
                     now_ts = time.time()
                     ck = f"{lang}|{name}|{q}"
                     cached = self._result_cache.get(ck)
@@ -579,8 +591,26 @@ class RoutingOrchestrator:
                 except Exception as exc:
                     result = None
                     text = f"[error] {exc}"
+                end_perf = time.perf_counter()
+                meta = {"duration_sec": float(max(0.0, end_perf - start_perf))}
+                try:
+                    if isinstance(result, dict):
+                        d = result.get("data")
+                        if isinstance(d, dict):
+                            c = d.get("count")
+                            if isinstance(c, int):
+                                meta["rows_count"] = c
+                            else:
+                                rows = d.get("rows") or []
+                                groups = d.get("groups") or []
+                                if isinstance(rows, list):
+                                    meta["rows_count"] = len(rows)
+                                elif isinstance(groups, list):
+                                    meta["rows_count"] = len(groups)
+                except Exception:
+                    pass
                 self._notify(callbacks, "on_routing_step", name, text, raw=result)
-                return {"source": name, "text": text, "raw": result}
+                return {"source": name, "text": text, "raw": result, "meta": meta}
 
             async def _run_all():
                 tasks = [asyncio.create_task(_run_single(n)) for n in ordered_sources]
@@ -590,21 +620,41 @@ class RoutingOrchestrator:
             try:
                 outputs = asyncio.run(_run_all())
             except RuntimeError:
-                # 已在事件循环中，降级为顺序
-                outputs = []
-                for name in ordered_sources:
-                    src = self.sources.get(name)
-                    if not src:
-                        continue
-                    try:
+                from concurrent.futures import ThreadPoolExecutor, as_completed
+                futures = []
+                with ThreadPoolExecutor(max_workers=len(ordered_sources)) as ex:
+                    for name in ordered_sources:
+                        src = self.sources.get(name)
+                        if not src:
+                            continue
                         q = rewritten.get(name, question)
-                        result = src.run(q, callbacks=callbacks)
-                        text = extract_agent_output(result)
-                    except Exception as exc:
-                        result = None
-                        text = f"[error] {exc}"
-                    outputs.append({"source": name, "text": text, "raw": result})
-                    self._notify(callbacks, "on_routing_step", name, text, raw=result)
+                        futures.append(ex.submit(lambda n, s, qq: (n, s.run(qq, callbacks=callbacks), qq), name, src, q))
+                    for fut in as_completed(futures):
+                        try:
+                            name, result, qq = fut.result()
+                            import time
+                            text = extract_agent_output(result)
+                            meta = {}
+                            try:
+                                if isinstance(result, dict):
+                                    d = result.get("data")
+                                    if isinstance(d, dict):
+                                        c = d.get("count")
+                                        if isinstance(c, int):
+                                            meta["rows_count"] = c
+                                        else:
+                                            rows = d.get("rows") or []
+                                            groups = d.get("groups") or []
+                                            if isinstance(rows, list):
+                                                meta["rows_count"] = len(rows)
+                                            elif isinstance(groups, list):
+                                                meta["rows_count"] = len(groups)
+                            except Exception:
+                                pass
+                            outputs.append({"source": name, "text": text, "raw": result, "meta": meta})
+                            self._notify(callbacks, "on_routing_step", name, text, raw=result)
+                        except Exception as exc:
+                            self._notify(callbacks, "on_routing_step", name, f"[error] {exc}")
         else:
             # 原有串行逻辑（保留 CSV→SQL 上下文传递）
             for name in ordered_sources:
@@ -659,10 +709,25 @@ class RoutingOrchestrator:
                                         csv_json = json.dumps(filtered, ensure_ascii=False)
                                     except Exception:
                                         pass
+                                    self._notify(callbacks, "on_selected_candidates", filtered)
+                                if ROUTER_STRICT_AFTER_CLARIFICATION:
+                                    strict_tables = []
+                                    try:
+                                        for c in filtered:
+                                            tname = c.get("table_name") or ""
+                                            if tname:
+                                                strict_tables.append(tname)
+                                    except Exception:
+                                        strict_tables = []
                         ctx = {
                             "csv_text": (last_csv.get("text") if last_csv else None),
                             "csv_candidates_json": csv_json,
                         }
+                        if ROUTER_STRICT_AFTER_CLARIFICATION:
+                            try:
+                                ctx["strict_tables"] = strict_tables if 'strict_tables' in locals() else []
+                            except Exception:
+                                ctx["strict_tables"] = []
                         intent = self._detect_intent(question, lang)
                         # SQL 上下文重写缓存
                         import time
@@ -690,8 +755,37 @@ class RoutingOrchestrator:
                     if rcached and (now_ts - rcached[0]) <= RESULT_CACHE_SECONDS:
                         result, text = rcached[1], rcached[2]
                     else:
+                        try:
+                            from app.sources.sql import set_allowed_tables
+                            set_allowed_tables(ctx.get("strict_tables") or [])
+                        except Exception:
+                            pass
                         result = src.run(q, callbacks=callbacks)
                         text = extract_agent_output(result)
+                        # 动态跨源：若在 SQL 阶段出现对 csv_lookup 的无效调用意图，则主动执行 CSV，再基于候选重写并重跑一次 SQL
+                        try:
+                            if (not csv_backfill_done) and name == "sql_database" and (("invalid_tool" in text and "csv_lookup" in text) or ("csv_lookup is not a valid tool" in text)):
+                                csv_src = self.sources.get("csv_lookup")
+                                if csv_src:
+                                    csv_res = csv_src.run(question, callbacks=callbacks)
+                                    csv_text2 = extract_agent_output(csv_res)
+                                    outputs.append({"source": "csv_lookup", "text": csv_text2, "raw": csv_res})
+                                    self._notify(callbacks, "on_routing_step", "csv_lookup", csv_text2, raw=csv_res)
+                                    # 提取候选并重写 SQL
+                                    csv_json2 = None
+                                    try:
+                                        if isinstance(csv_res, dict):
+                                            csv_json2 = RoutingOrchestrator._extract_csv_candidates(csv_res)
+                                    except Exception:
+                                        csv_json2 = None
+                                    ctx["csv_text"] = csv_text2
+                                    ctx["csv_candidates_json"] = csv_json2
+                                    q = self._rewrite_for_sql(question, lang, intent, context=ctx)
+                                    result = src.run(q, callbacks=callbacks)
+                                    text = extract_agent_output(result)
+                                    csv_backfill_done = True
+                        except Exception:
+                            pass
                         self._result_cache[rck] = (now_ts, result, text)
                 except Exception as exc:
                     result = None
@@ -700,10 +794,16 @@ class RoutingOrchestrator:
                 self._notify(callbacks, "on_routing_step", name, text, raw=result)
         # Merge final answer with citations
         final_text = self._summarize_outputs(outputs, plan_data, lang, callbacks=callbacks)
-        return {
+        result_payload = {
             "plan": plan_data,
             "plan_raw": raw_plan,
             "probe": probe_info,
             "outputs": outputs,
             "final_text": final_text,
         }
+        try:
+            if clarify_choice and ROUTER_STRICT_AFTER_CLARIFICATION:
+                result_payload["selected_candidates"] = json.loads(csv_json) if csv_json else []
+        except Exception:
+            result_payload["selected_candidates"] = []
+        return result_payload
